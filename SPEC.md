@@ -98,17 +98,29 @@ lark-cli im +messages-search --as user --sender <SELF_OPEN_ID> \
   `promo-error-report`, `*| Slack`). Name resolution needs bot capability +
   `im:chat:readonly`; until then, `--exclude-sender-type bot` carries it.
 - Dedupe by `message_id`.
+- **Cap at `MAX_MESSAGES`** (default 200) per run as a rate-limit guard, and
+  report how many were dropped (never truncate silently).
 
 ---
 
 ## AI classification
 
-Each surviving message → `urgency` (high|medium|low), `category`
-(incident|decision_needed|review_request|question|fyi), and a ≤15-word `summary`
-focused on what the sender needs. Definitions unchanged from v1. In the
-**agent-driven skill** the agent classifies inline; in the **Node app** a
-chunked Claude call (`claude-sonnet-4-6`, ≤40 msgs/call) does it, with a
-low/fyi fallback so nothing is dropped.
+Each surviving message gets an `urgency`, a `category`, and a ≤15-word `summary`
+focused on what the sender needs from me.
+
+**Urgency**
+- `high` — action required today: incident/outage/blocking, explicit sign-off, "urgent/ASAP/down/broken"
+- `medium` — response needed but not time-critical: reviews, questions, feedback
+- `low` — informational / FYI / casual chatter, no action needed
+
+**Category** — `incident` (prod broken/degraded), `decision_needed` (my approval
+or choice required), `review_request` (PRD/doc/code/design), `question` (I'm being
+asked something), `fyi` (informational only).
+
+In the **agent-driven skill** the agent classifies inline; in the **Node app** a
+chunked Claude call (`claude-sonnet-4-6`, ≤40 msgs/call, run concurrently) does
+it, with a `low`/`fyi` fallback so a message is never dropped on a parse error or
+when no API key is set.
 
 ---
 
@@ -157,12 +169,31 @@ resent** (not edited in place); survivors are renumbered.
 
 - **Trigger / events:** `lark-cli event consume im.message.receive_v1` over the
   WebSocket long-connection — **no public webhook URL**. (Bot mode.)
+- **Commands:** in bot mode, DM the bot `digest` (case-insensitive) → it posts a
+  loading ack (`⏳ Fetching your mentions…`) then the card; `done <n…>` /
+  `snooze <n…>` manage items. In CLI mode: `npm run digest | done | snooze | listen`.
 - **All Lark calls:** shell out to `lark-cli`; it owns token storage + refresh.
 - **Send identity:** `SEND_AS=user` → digest to my **self-chat** (works today);
   `SEND_AS=bot` → bot replies in its DM (needs bot scopes + published version).
 - Two delivery forms of the same logic: the **`lark-triage` skill** (agent
   classifies inline, on-demand) and the **Node app** (`npm run digest|listen`,
   unattended/scheduled).
+
+## Configuration (env vars — see `.env.example`)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — (required) | Claude classification; without it every item falls back to `low`/`fyi` |
+| `SEND_AS` | `user` | `user` → deliver to my self-chat (works today); `bot` → bot DM reply (needs published bot-send scopes) |
+| `CLAUDE_MODEL` | `claude-sonnet-4-6` | Classification model |
+| `LOOKBACK_HOURS` | `24` | Max lookback per run (the cap). `LOOKBACK_DAYS` still honored for back-compat (×24) |
+| `WATERMARK_LOOKBACK_DAYS` | `14` | How far back to scan my own messages when building the reply watermark |
+| `SNOOZE_HOURS` | `24` | How long `snooze` hides an item |
+| `LOW_DISPLAY_LIMIT` | `10` | Max LOW/FYI items rendered on the card (rest → "+N more") |
+| `MAX_MESSAGES` | `200` | Per-run fetch cap (rate-limit guard) |
+| `LARK_USER_OPEN_ID` | auto | Override my open_id (else auto-detected from `auth status`) |
+
+No Lark secrets here — `lark-cli` owns Lark auth.
 
 ## Lark API limitations discovered (so we don't relitigate)
 
@@ -175,6 +206,24 @@ resent** (not edited in place); survivors are renumbered.
 | Send as bot | Needs `im:message:send_as_bot` + `im:message` on a **published** version |
 | `messages-search` time format | Numeric offset, no ms (`+00:00`); `.sssZ` → `99992402` |
 | Patch/edit a sent card | No message-patch method → re-render + resend |
+
+## Non-functional requirements
+
+- **On-demand only** — no polling; a run happens when I trigger `digest` (or `npm run digest`).
+- **Idempotent** — `lastRunAt` advances each run; re-running back-to-back doesn't
+  re-surface the same items.
+- **Graceful empty state** — `✅ You're all caught up! …` when nothing is unread.
+- **State persistence** — local JSON only, no DB (see State section).
+- **Latency** — incremental runs are fast, but a first/large run is **not**
+  real-time: the reply-watermark adds a `--sender` search over
+  `WATERMARK_LOOKBACK_DAYS`, so a wide window can take tens of seconds (~33s for
+  24h, ~80s for 7d observed). The original "<10s" target does **not** hold for
+  large backlogs — acceptable for an on-demand tool, and the 24h cap keeps the
+  common case small.
+- **Privacy** — message text is sent to the Anthropic API for classification;
+  confirm this is acceptable for internal content before wider use.
+- **Auth resilience** — owned by `lark-cli`; a `needs_refresh` token is still
+  usable (it refreshes on the next API call), so runs don't fail on it.
 
 ## Out of scope (for now)
 
