@@ -1,0 +1,20 @@
+{
+  "name": "lark-triage-bot",
+  "version": "1.0.0",
+  "description": "On-demand Lark triage assistant: scans your @mentions and DMs, classifies them with Claude, and delivers a prioritised interactive-card digest.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "digest": "node src/index.js digest",
+    "done": "node src/index.js done",
+    "snooze": "node src/index.js snooze",
+    "listen": "node src/index.js listen"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.65.0",
+    "dotenv": "^16.4.5"
+  }
+}

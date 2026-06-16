@@ -1,0 +1,8 @@
+node_modules/
+.env
+state.json
+lark-im-resources/
+*.log
+
+# Local Claude Code settings (personal, not shared)
+.claude/settings.local.json
