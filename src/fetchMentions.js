@@ -1,6 +1,7 @@
 import { searchMessages, getChatName } from './lark.js';
 import { config, isExcludedChatName } from './config.js';
 import { hiddenMessageIds } from './state.js';
+import { MS_PER_DAY } from './time.js';
 
 /** Parse Lark's "YYYY-MM-DD HH:MM" local-time string into a Date. */
 function parseCreateTime(s) {
@@ -14,7 +15,7 @@ function parseCreateTime(s) {
  * (e.g. "[Sticker]", "[Image: img_xxx]"). A message with nothing but
  * placeholders carries no human-actionable text and is excluded.
  */
-function hasMeaningfulText(text) {
+export function hasMeaningfulText(text) {
   const stripped = (text || '')
     .replace(/\[Sticker\]/gi, '')
     .replace(/\[Image:[^\]]*\]/gi, '')
@@ -34,16 +35,25 @@ function normalize(msg, { isDM }) {
     isDM,
     senderId: msg.sender?.id || null,
     senderName: msg.sender?.name || msg.sender?.id || 'Someone',
-    senderType: msg.sender?.sender_type || 'user',
     text,
     createTime: parseCreateTime(msg.create_time),
-    createTimeRaw: msg.create_time || null,
     // Lark gives us a real, working deep link per message — prefer it over
     // hand-constructing an applink.
     link: msg.message_app_link || null,
-    msgType: msg.msg_type,
     deleted: !!msg.deleted,
   };
+}
+
+/**
+ * Unread (reply-watermark) test: a candidate is unread only if it is newer than
+ * the user's own latest message in that chat. No watermark for the chat (the
+ * user never posted there in the lookback) ⇒ treat as unread. Lark has no real
+ * read-state, so this is the proxy — see SPEC.md.
+ */
+export function isUnread(item, watermark) {
+  const latestOwn = watermark.get(item.chatId) || 0;
+  if (!item.position || !latestOwn) return true;
+  return item.position > latestOwn;
 }
 
 /**
@@ -53,7 +63,7 @@ function normalize(msg, { isDM }) {
  * Lark exposes no real read-state, so this is the proxy — see SPEC.md.
  */
 async function buildWatermark(self) {
-  const start = new Date(Date.now() - config.watermarkLookbackDays * 864e5).toISOString();
+  const start = new Date(Date.now() - config.watermarkLookbackDays * MS_PER_DAY).toISOString();
   const mine = await searchMessages({ sender: self.openId, start });
   const wm = new Map();
   for (const m of mine) {
@@ -93,11 +103,9 @@ export async function fetchSince(startISO, self, state) {
   const hidden = hiddenMessageIds(state);
   const skipped = { read: 0, hidden: 0, excludedChat: 0, empty: 0, capped: 0 };
 
-  // Unread filter (reply-watermark): drop anything at/before my latest message
-  // in that chat. Applies to BOTH mentions and DMs.
+  // Unread filter (reply-watermark) — applies to BOTH mentions and DMs.
   items = items.filter((it) => {
-    const wm = watermark.get(it.chatId) || 0;
-    if (it.position && wm && it.position <= wm) { skipped.read++; return false; }
+    if (!isUnread(it, watermark)) { skipped.read++; return false; }
     return true;
   });
 

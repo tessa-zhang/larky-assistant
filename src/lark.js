@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
  */
 
 const MAX_BUFFER = 64 * 1024 * 1024; // messages + cards can be large
+const MAX_SEARCH_PAGES = '40'; // auto-pagination ceiling for messages-search
 
 function runRaw(args) {
   return new Promise((resolve, reject) => {
@@ -56,10 +57,6 @@ export async function getSelf() {
   };
 }
 
-export function applinkDomain(brand) {
-  return brand === 'feishu' ? 'applink.feishu.cn' : 'applink.larksuite.com';
-}
-
 /**
  * lark-cli's messages-search --start/--end want ISO 8601 with a numeric offset
  * and no milliseconds (e.g. 2026-03-25T23:59:59+08:00); a `.sssZ` value fails
@@ -78,7 +75,7 @@ function toLarkTime(v) {
  * opts: { isAtMe, chatType: 'group'|'p2p', start, end, excludeSenderType }
  */
 export async function searchMessages(opts = {}) {
-  const args = ['im', '+messages-search', '--as', 'user', '--page-all', '--page-limit', '40', '--json'];
+  const args = ['im', '+messages-search', '--as', 'user', '--page-all', '--page-limit', MAX_SEARCH_PAGES, '--json'];
   if (opts.isAtMe) args.push('--is-at-me');
   if (opts.chatType) args.push('--chat-type', opts.chatType);
   if (opts.start) args.push('--start', toLarkTime(opts.start));

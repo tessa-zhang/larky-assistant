@@ -11,7 +11,8 @@
     "digest": "node src/index.js digest",
     "done": "node src/index.js done",
     "snooze": "node src/index.js snooze",
-    "listen": "node src/index.js listen"
+    "listen": "node src/index.js listen",
+    "test": "node --test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.65.0",

@@ -7,6 +7,9 @@ import { runDigest, runDone, runSnooze } from './commands.js';
 const CLI_FOOTER = '↩ Run `npm run done 2` / `npm run snooze 1 3` · `npm run digest` to refresh';
 const BOT_FOOTER = '↩ Reply `done 2` or `snooze 1 3` · type `digest` to refresh';
 
+// Lark API: app/identity is missing a required permission scope.
+const LARK_ERROR_MISSING_SCOPE = 99991672;
+
 function parseNumbers(args) {
   return args
     .join(' ')
@@ -35,7 +38,7 @@ async function cmdDone(self, args) {
   if (!numbers.length) return console.error('Usage: npm run done -- 2 3');
   const { delivery, footerHint } = cliDelivery(self);
   const r = await runDone({ delivery, footerHint, numbers });
-  console.log(`Done: ${r.done} item(s).`);
+  console.log(`Done: ${r.affected} item(s).`);
 }
 
 async function cmdSnooze(self, args) {
@@ -43,7 +46,7 @@ async function cmdSnooze(self, args) {
   if (!numbers.length) return console.error('Usage: npm run snooze -- 1 3');
   const { delivery, footerHint } = cliDelivery(self);
   const r = await runSnooze({ delivery, footerHint, numbers });
-  console.log(`Snoozed: ${r.snoozed} item(s).`);
+  console.log(`Snoozed: ${r.affected} item(s).`);
 }
 
 function summarizeSkips(s) {
@@ -139,7 +142,7 @@ async function main() {
 
 main().catch((err) => {
   console.error('Fatal:', err.message);
-  if (err.larkError?.code === 99991672) {
+  if (err.larkError?.code === LARK_ERROR_MISSING_SCOPE) {
     console.error('→ Missing Lark scope. See README "Enabling the bot".');
   }
   process.exit(1);

@@ -65,15 +65,7 @@ export function isExcludedChatName(name) {
 export const URGENCY_ORDER = { high: 0, medium: 1, low: 2 };
 
 export const URGENCY_META = {
-  high: { emoji: '🔴', label: 'HIGH PRIORITY', headerTemplate: 'red' },
-  medium: { emoji: '🟡', label: 'MEDIUM', headerTemplate: 'orange' },
-  low: { emoji: '🟢', label: 'LOW / FYI', headerTemplate: 'green' },
-};
-
-export const CATEGORY_LABEL = {
-  incident: 'incident',
-  decision_needed: 'decision_needed',
-  review_request: 'review_request',
-  question: 'question',
-  fyi: 'fyi',
+  high: { emoji: '🔴', label: 'HIGH PRIORITY' },
+  medium: { emoji: '🟡', label: 'MEDIUM' },
+  low: { emoji: '🟢', label: 'LOW / FYI' },
 };

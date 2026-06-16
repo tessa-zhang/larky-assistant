@@ -1,31 +1,9 @@
 import { URGENCY_ORDER, URGENCY_META, config } from './config.js';
+import { formatDateTime, relativeTime } from './time.js';
 
-/** Human "45m ago" / "2h ago" / "3d ago". */
-export function relativeTime(date, now = new Date()) {
-  if (!date) return '';
-  const diffMs = now.getTime() - date.getTime();
-  const m = Math.round(diffMs / 60000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m}m ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.round(h / 24);
-  return `${d}d ago`;
-}
-
-function fmtHeaderDate(d) {
-  return d.toLocaleString('en-GB', {
-    weekday: 'short', day: '2-digit', month: 'short',
-    hour: 'numeric', minute: '2-digit', hour12: true,
-  });
-}
-
-function fmtSince(d) {
-  if (!d) return 'the last 7 days';
-  return 'since ' + d.toLocaleString('en-GB', {
-    weekday: 'short', day: '2-digit', month: 'short',
-    hour: 'numeric', minute: '2-digit', hour12: true,
-  });
+/** Subtitle window phrase, e.g. "since Tue 16 Jun, 3:51 pm". */
+function sinceText(windowStart) {
+  return windowStart ? `since ${formatDateTime(windowStart)}` : 'recently';
 }
 
 // Escape lark_md control chars in untrusted text so summaries render literally.
@@ -72,7 +50,7 @@ export function buildDigestCard({ items, since, generatedAt = new Date(), footer
   const elements = [
     {
       tag: 'div',
-      text: { tag: 'lark_md', content: `Showing **${items.length}** mention${items.length === 1 ? '' : 's'} & DM${items.length === 1 ? '' : 's'} ${fmtSince(since)}` },
+      text: { tag: 'lark_md', content: `Showing **${items.length}** mention${items.length === 1 ? '' : 's'} & DM${items.length === 1 ? '' : 's'} ${sinceText(since)}` },
     },
   ];
 
@@ -101,7 +79,7 @@ export function buildDigestCard({ items, since, generatedAt = new Date(), footer
     config: { wide_screen_mode: true },
     header: {
       template: 'blue',
-      title: { tag: 'plain_text', content: `📋 Your Triage Digest — ${fmtHeaderDate(now)}` },
+      title: { tag: 'plain_text', content: `📋 Your Triage Digest — ${formatDateTime(now)}` },
     },
     elements,
   };

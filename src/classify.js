@@ -45,7 +45,7 @@ function fallback(item) {
 }
 
 /** Strip ```json fences if the model wrapped its output despite instructions. */
-function extractJson(text) {
+export function extractJson(text) {
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const body = (fence ? fence[1] : text).trim();
   const start = body.indexOf('[');

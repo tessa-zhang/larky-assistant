@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { MS_PER_HOUR } from './time.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_PATH = join(__dirname, '..', 'state.json');
@@ -59,7 +60,7 @@ export function markDone(state, messageIds) {
 }
 
 export function snooze(state, messageIds, hours, now = new Date()) {
-  const snoozeUntil = new Date(now.getTime() + hours * 3600 * 1000).toISOString();
+  const snoozeUntil = new Date(now.getTime() + hours * MS_PER_HOUR).toISOString();
   const byId = new Map((state.snoozedMessages || []).map((s) => [s.messageId, s]));
   for (const id of messageIds) byId.set(id, { messageId: id, snoozeUntil });
   state.snoozedMessages = [...byId.values()];

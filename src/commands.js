@@ -3,6 +3,7 @@ import { sendMessage } from './lark.js';
 import { buildDigestCard } from './buildCard.js';
 import { fetchSince } from './fetchMentions.js';
 import { classify } from './classify.js';
+import { formatDateTime, MS_PER_HOUR } from './time.js';
 import * as store from './state.js';
 
 /** Send text or an interactive card to the configured target. */
@@ -37,7 +38,7 @@ function rehydrate(items) {
 // Start of the fetch window: the later of lastRunAt and the lookback cap, so a
 // single run never reaches back further than `lookbackHours` (no big backlog).
 function startWindow(state) {
-  const cap = new Date(Date.now() - config.lookbackHours * 3600e3).toISOString();
+  const cap = new Date(Date.now() - config.lookbackHours * MS_PER_HOUR).toISOString();
   return state.lastRunAt && state.lastRunAt > cap ? state.lastRunAt : cap;
 }
 
@@ -56,8 +57,7 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
   const { items, skipped } = await fetchSince(since, self, state);
 
   if (items.length === 0) {
-    const when = sinceDate.toLocaleString('en-GB', { weekday: 'short', day: '2-digit', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
-    await deliver(delivery, `✅ You're all caught up! No new unread mentions or DMs since ${when}.`);
+    await deliver(delivery, `✅ You're all caught up! No new unread mentions or DMs since ${formatDateTime(sinceDate)}.`);
     state.lastRunAt = runAt.toISOString();
     state.lastDigest = { generatedAt: runAt.toISOString(), since, items: [] };
     await store.save(state);
@@ -111,30 +111,40 @@ async function rerender(state, delivery, footerHint) {
   await deliver(delivery, card, 'interactive');
 }
 
-export async function runDone({ delivery, footerHint, numbers }) {
+const noMatchMessage = (numbers) =>
+  `⚠️ No matching items for: ${numbers.join(', ')}. Run a digest first, then reference the numbers shown.`;
+
+/**
+ * Shared done/snooze flow: resolve card numbers → apply `mutate` → confirm →
+ * re-render the survivors. `confirm(refs)` builds the action-specific message.
+ */
+async function applyToMatched({ delivery, footerHint, numbers, mutate, confirm }) {
   const state = store.clearExpiredSnoozes(await store.load());
   const { matched, invalid } = resolveNumbers(state, numbers);
   if (matched.length === 0) {
-    await deliver(delivery, `⚠️ No matching items for: ${numbers.join(', ')}. Run a digest first, then reference the numbers shown.`);
-    return { done: 0, invalid };
+    await deliver(delivery, noMatchMessage(numbers));
+    return { affected: 0, invalid };
   }
-  store.markDone(state, matched.map((it) => it.messageId));
-  const summary = matched.map((it) => `#${it.n}`).join(', ');
-  await deliver(delivery, `✅ Marked ${summary} as done.${invalid.length ? ` (no item: ${invalid.join(', ')})` : ''}`);
+  mutate(state, matched.map((it) => it.messageId));
+  const refs = matched.map((it) => `#${it.n}`).join(', ');
+  const tail = invalid.length ? ` (no item: ${invalid.join(', ')})` : '';
+  await deliver(delivery, confirm(refs) + tail);
   await rerender(state, delivery, footerHint);
-  return { done: matched.length, invalid };
+  return { affected: matched.length, invalid };
 }
 
-export async function runSnooze({ delivery, footerHint, numbers }) {
-  const state = store.clearExpiredSnoozes(await store.load());
-  const { matched, invalid } = resolveNumbers(state, numbers);
-  if (matched.length === 0) {
-    await deliver(delivery, `⚠️ No matching items for: ${numbers.join(', ')}. Run a digest first, then reference the numbers shown.`);
-    return { snoozed: 0, invalid };
-  }
-  store.snooze(state, matched.map((it) => it.messageId), config.snoozeHours);
-  const summary = matched.map((it) => `#${it.n}`).join(', ');
-  await deliver(delivery, `😴 Snoozed ${summary} for ${config.snoozeHours}h.${invalid.length ? ` (no item: ${invalid.join(', ')})` : ''}`);
-  await rerender(state, delivery, footerHint);
-  return { snoozed: matched.length, invalid };
+export function runDone({ delivery, footerHint, numbers }) {
+  return applyToMatched({
+    delivery, footerHint, numbers,
+    mutate: store.markDone,
+    confirm: (refs) => `✅ Marked ${refs} as done.`,
+  });
+}
+
+export function runSnooze({ delivery, footerHint, numbers }) {
+  return applyToMatched({
+    delivery, footerHint, numbers,
+    mutate: (state, ids) => store.snooze(state, ids, config.snoozeHours),
+    confirm: (refs) => `😴 Snoozed ${refs} for ${config.snoozeHours}h.`,
+  });
 }
