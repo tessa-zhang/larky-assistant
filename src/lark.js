@@ -116,7 +116,8 @@ export async function getChatName(chatId, as = 'user') {
   if (!chatId) return null;
   if (chatNameCache.has(chatId)) return chatNameCache.get(chatId);
   try {
-    const res = await runRaw(['im', 'chats', 'get', '--chat-id', chatId, '--as', as, '--json']);
+    // chat_id is a path param — lark-cli takes it via --params, not a flag.
+    const res = await runRaw(['im', 'chats', 'get', '--params', JSON.stringify({ chat_id: chatId }), '--as', as, '--json']);
     const name = res.data?.name || res.name || null;
     chatNameCache.set(chatId, name);
     return name;

@@ -15,10 +15,11 @@ export const config = {
   // Claude model for classification.
   model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
 
-  // Max lookback window for any run. Every digest is capped to this many hours
-  // (start = later of lastRunAt and now-lookback), so you never get a large
-  // backlog of older — likely-already-read — items. Default 24h.
-  lookbackHours: Number(process.env.LOOKBACK_HOURS || (process.env.LOOKBACK_DAYS ? Number(process.env.LOOKBACK_DAYS) * 24 : 24)),
+  // Fixed lookback window for every run: each digest scans the last N hours for
+  // CURRENTLY-unread mentions/DMs — independent of when you last ran it. Running
+  // a digest does not mark anything read, so the unread backlog must persist
+  // across runs (cleared only by replying, `done`, or `snooze`). Default 72h (3d).
+  lookbackHours: Number(process.env.LOOKBACK_HOURS || (process.env.LOOKBACK_DAYS ? Number(process.env.LOOKBACK_DAYS) * 24 : 72)),
 
   // How far back to look for the user's own messages when building the reply
   // watermark (so a reply just before the digest window still counts as "read").
@@ -38,6 +39,11 @@ export const config = {
   // Max LOW/FYI items rendered on the card (high/medium always shown in full);
   // the rest are summarised as "+N more". Keeps a busy digest readable.
   lowDisplayLimit: Number(process.env.LOW_DISPLAY_LIMIT || 10),
+
+  // Characters of the verbatim message shown beneath the AI summary on each card
+  // item (≈2 lines on a wide card). The exact wording, so you can triage without
+  // opening the chat (which would mark it read).
+  rawPreviewChars: Number(process.env.RAW_PREVIEW_CHARS || 160),
 };
 
 /**

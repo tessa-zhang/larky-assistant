@@ -50,12 +50,21 @@ Rationale: if I posted *after* a message, I've necessarily read it. `message_pos
 is a per-chat monotonic sequence, so this ordering is exact (more reliable than
 the minute-granularity `create_time`).
 
+**Thread/topic replies** come back with the sentinel `message_position = "-3"`
+(not a real sequence number). A naive `position > watermark` test reads `-3` as
+*older than everything* and wrongly drops it — so any **non-positive** position
+is treated as *uncomparable ⇒ unread*. (~half of @mentions are thread replies, so
+this matters a lot.)
+
 **Layered with two more filters**, an item is shown only if ALL hold:
 1. **Unread** by the watermark rule (above).
 2. **Not** in `doneMessageIds` and **not** currently snoozed.
-3. Within the **lookback window** — capped at `LOOKBACK_HOURS` (default **24h**):
-   `start = later of (last-digest time, now − 24h)`, so no run ever pulls a large
-   backlog of older, likely-already-read items.
+3. Within the **lookback window** — a **fixed** `LOOKBACK_HOURS` (default **72h /
+   3 days**): `start = now − LOOKBACK_HOURS`, **independent of when the digest last
+   ran**. Running a digest doesn't read anything, so each run must re-surface the
+   whole current unread backlog in the window — not just messages newer than the
+   last run. Items leave the digest only by replying (watermark), `done`, or
+   `snooze`.
 
 **Known blind spot (irreducible):** a message I *read but never replied to*
 (e.g. a "sureee" closer, or a group @mention I read silently) will appear once.
@@ -91,15 +100,22 @@ lark-cli im +messages-search --as user --sender <SELF_OPEN_ID> \
 ### Filtering after fetch
 - Apply the **watermark rule** to mentions **and** DMs.
 - Drop my own messages (`sender.id == SELF`).
+- Drop **automated senders** — `sender_type` of `bot` *or* `app`. The
+  `--exclude-sender-type bot` search flag drops only `bot`; `app` senders (release
+  cards, alert apps, Slack mirrors) slip through it, so they're dropped here too.
 - Drop `done`/snoozed; drop `deleted`; drop messages with **no meaningful text**
   after stripping placeholders (`[Sticker]`, `[Image: …]`, `[File: …]`, …).
 - Drop known **noise channels** by name *when resolvable* (`unbookable-item-alert-*`,
   `cross-sell-null-item-alert-*`, `merchandising_oncall`, `release-and-hotfix`,
   `promo-error-report`, `*| Slack`). Name resolution needs bot capability +
-  `im:chat:readonly`; until then, `--exclude-sender-type bot` carries it.
-- Dedupe by `message_id`.
-- **Cap at `MAX_MESSAGES`** (default 200) per run as a rate-limit guard, and
-  report how many were dropped (never truncate silently).
+  `im:chat:readonly`; until then, `--exclude-sender-type bot` + the `app` filter
+  carry it.
+- Dedupe by `message_id`, then **collapse to one row per chat** — the latest
+  unread message, mirroring Lark's "@ Mentions" tab. The kept row carries
+  `chatUnreadCount` so the card can show "+N more" for that chat.
+- **Cap at `MAX_MESSAGES`** (default 200) per run (now post-dedup, so it caps
+  chats) as a rate-limit guard, and report how many were dropped (never truncate
+  silently).
 
 ---
 
@@ -127,10 +143,18 @@ when no API key is set.
 ## Digest card
 
 Lark interactive card. Grouped 🔴 HIGH / 🟡 MEDIUM / 🟢 LOW, **items numbered
-1..N globally** (numbers are how `done`/`snooze` reference items). Each item:
-label `[chat or sender · DM]`, category, relative time, quoted summary, and a
-`↗ Jump to message` URL button. LOW bucket capped (~10) with a "+N more" note.
-Empty state → `✅ You're all caught up!`.
+1..N globally** (numbers are how `done`/`snooze` reference items). One row per
+chat (latest unread). Each item:
+- label `[chat name]` for groups (falls back to `[sender · group]` until bot
+  capability resolves names) or `[sender · DM]` for DMs, plus category, relative
+  time, and `· +N more` when the chat has further unread messages;
+- the AI **summary** (what the sender needs from me);
+- the **verbatim message** beneath it — `💬 <sender>: "<excerpt>"`, truncated to
+  `RAW_PREVIEW_CHARS` (≈2 lines) — so I can triage without opening the chat (which
+  would mark it read);
+- a `↗ Jump to message` URL button.
+
+LOW bucket capped (~10) with a "+N more" note. Empty state → `✅ You're all caught up!`.
 
 ---
 
@@ -186,7 +210,8 @@ resent** (not edited in place); survivors are renumbered.
 | `ANTHROPIC_API_KEY` | — (required) | Claude classification; without it every item falls back to `low`/`fyi` |
 | `SEND_AS` | `user` | `user` → deliver to my self-chat (works today); `bot` → bot DM reply (needs published bot-send scopes) |
 | `CLAUDE_MODEL` | `claude-sonnet-4-6` | Classification model |
-| `LOOKBACK_HOURS` | `24` | Max lookback per run (the cap). `LOOKBACK_DAYS` still honored for back-compat (×24) |
+| `LOOKBACK_HOURS` | `72` | Fixed lookback per run (3 days), independent of last run. `LOOKBACK_DAYS` still honored for back-compat (×24) |
+| `RAW_PREVIEW_CHARS` | `160` | Chars of the verbatim message shown under each summary (≈2 lines) |
 | `WATERMARK_LOOKBACK_DAYS` | `14` | How far back to scan my own messages when building the reply watermark |
 | `SNOOZE_HOURS` | `24` | How long `snooze` hides an item |
 | `LOW_DISPLAY_LIMIT` | `10` | Max LOW/FYI items rendered on the card (rest → "+N more") |
@@ -210,16 +235,18 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 ## Non-functional requirements
 
 - **On-demand only** — no polling; a run happens when I trigger `digest` (or `npm run digest`).
-- **Idempotent** — `lastRunAt` advances each run; re-running back-to-back doesn't
-  re-surface the same items.
+- **Stateless window (by design)** — re-running re-surfaces the *same* current
+  unread backlog within `LOOKBACK_HOURS`; a digest run does **not** mark anything
+  read. Items leave only via replying (watermark), `done`, or `snooze`. (`lastRunAt`
+  is still recorded, but no longer gates the window.)
 - **Graceful empty state** — `✅ You're all caught up! …` when nothing is unread.
 - **State persistence** — local JSON only, no DB (see State section).
 - **Latency** — incremental runs are fast, but a first/large run is **not**
   real-time: the reply-watermark adds a `--sender` search over
   `WATERMARK_LOOKBACK_DAYS`, so a wide window can take tens of seconds (~33s for
   24h, ~80s for 7d observed). The original "<10s" target does **not** hold for
-  large backlogs — acceptable for an on-demand tool, and the 24h cap keeps the
-  common case small.
+  large backlogs — acceptable for an on-demand tool, and the 72h (3-day) default
+  keeps the common case bounded.
 - **Privacy** — message text is sent to the Anthropic API for classification;
   confirm this is acceptable for internal content before wider use.
 - **Auth resilience** — owned by `lark-cli`; a `needs_refresh` token is still

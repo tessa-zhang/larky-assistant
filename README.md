@@ -2,8 +2,10 @@
 
 An on-demand triage assistant for Lark. It scans your **unread @mentions** (group
 chats) and **unread DMs** (1:1 chats), classifies each by urgency with Claude,
-and delivers a prioritised **interactive card** with deep links to jump straight
-to each message — plus `done` / `snooze` to keep the list clean.
+and delivers a prioritised **interactive card** — one row per chat, each showing
+the AI summary **plus the exact message text** and a deep link to jump straight
+to it — so you can triage without opening (and thereby reading) the chat. Plus
+`done` / `snooze` to keep the list clean.
 
 > See **[SPEC.md](SPEC.md)** for the authoritative requirements, the definition
 > of "unread" (a reply-watermark proxy — Lark exposes no real read-state), and
@@ -86,7 +88,7 @@ When that succeeds, set `SEND_AS=bot` and run `npm run listen`.
 
 | Command | Action |
 |---|---|
-| `npm run digest` | Fetch mentions+DMs since last run, classify, deliver card |
+| `npm run digest` | Fetch currently-unread mentions+DMs (last 3 days), classify, deliver card |
 | `npm run done -- <n…>` | Mark card items done (never reappear) |
 | `npm run snooze -- <n…>` | Hide items for `SNOOZE_HOURS` (default 24h) |
 | `npm run listen` | Bot mode: react to `digest` / `done` / `snooze` DMs |
@@ -99,23 +101,31 @@ src/
 ├── config.js       # constants, noise-exclusion patterns
 ├── state.js        # state.json: lastRun, done, snooze, last-digest snapshot
 ├── lark.js         # lark-cli exec wrapper
-├── fetchMentions.js# messages-search: @mentions (group) + DMs (p2p) since last run
+├── fetchMentions.js# messages-search: unread @mentions (group) + DMs (p2p), one row per chat
 ├── classify.js     # chunked Claude calls (40/call, concurrent) → urgency/category/summary
 ├── buildCard.js    # Lark interactive card JSON
 └── commands.js     # digest / done / snooze orchestration
 ```
 
 - **Fetching** uses `messages-search --is-at-me` (group) and `--chat-type p2p`
-  (DMs), both with `--exclude-sender-type bot` — so automated/bot noise is
-  dropped at the source, and there's no need to iterate every chat.
+  (DMs), both with `--exclude-sender-type bot`. `app` senders (release cards,
+  alert apps, Slack mirrors) slip past that flag, so they're dropped client-side
+  too. Results are then collapsed to **one row per chat** (latest unread, with a
+  `+N more` hint), mirroring Lark's "@ Mentions" tab.
 - **Unread filter** (reply-watermark): a third `--sender <me>` search builds a
   per-chat watermark (my latest `message_position`); any mention/DM at or before
-  it is treated as already-read and dropped. Lark has no read-state API, so this
-  is the proxy. See [SPEC.md](SPEC.md).
+  it is treated as already-read and dropped. Thread replies arrive as the sentinel
+  `message_position = "-3"`, which is treated as *uncomparable ⇒ unread* (a naive
+  compare would wrongly drop ~half of @mentions). Lark has no read-state API, so
+  this is the proxy. See [SPEC.md](SPEC.md).
+- **Each card item** shows the AI summary **and the verbatim message** (truncated
+  to ~2 lines) so you can triage without opening the chat — which would mark it
+  read in Lark.
 - **`done` / `snooze`** re-render from a cached snapshot of the last digest
   (`state.lastDigest`), so they're instant — no re-fetch or re-classify.
-- **Idempotent**: `lastRunAt` advances each digest, so a second `digest` only
-  picks up genuinely newer messages.
+- **Fixed window**: every run scans the last `LOOKBACK_HOURS` (default 72h / 3
+  days) for *currently-unread* items — running a digest doesn't read anything, so
+  re-running re-surfaces the same backlog until you reply, `done`, or `snooze` it.
 
 ## State (`state.json`, auto-created)
 

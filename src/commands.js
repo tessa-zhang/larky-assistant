@@ -35,11 +35,12 @@ function rehydrate(items) {
   return items || [];
 }
 
-// Start of the fetch window: the later of lastRunAt and the lookback cap, so a
-// single run never reaches back further than `lookbackHours` (no big backlog).
-function startWindow(state) {
-  const cap = new Date(Date.now() - config.lookbackHours * MS_PER_HOUR).toISOString();
-  return state.lastRunAt && state.lastRunAt > cap ? state.lastRunAt : cap;
+// Start of the fetch window: a FIXED lookback from now, independent of when the
+// digest last ran. Running a digest doesn't read anything, so each run must
+// re-surface the whole current unread backlog within the window (cleared only by
+// replying, `done`, or `snooze`) — not just messages newer than the last run.
+function startWindow() {
+  return new Date(Date.now() - config.lookbackHours * MS_PER_HOUR).toISOString();
 }
 
 /**
@@ -48,8 +49,8 @@ function startWindow(state) {
  */
 export async function runDigest({ self, delivery, footerHint, ack = false }) {
   const state = store.clearExpiredSnoozes(await store.load());
-  const since = startWindow(state);
-  const sinceDate = new Date(since); // actual window start (capped)
+  const since = startWindow();
+  const sinceDate = new Date(since); // fixed lookback window start
   const runAt = new Date();
 
   if (ack) await deliver(delivery, '⏳ Fetching your mentions, give me a moment…');

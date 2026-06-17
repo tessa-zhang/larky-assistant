@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 
 import { relativeTime, formatDateTime, MS_PER_HOUR } from '../src/time.js';
 import { isExcludedChatName, config } from '../src/config.js';
-import { hasMeaningfulText, isUnread } from '../src/fetchMentions.js';
+import { hasMeaningfulText, isUnread, dedupeByChat } from '../src/fetchMentions.js';
 import { extractJson } from '../src/classify.js';
-import { buildDigestCard } from '../src/buildCard.js';
+import { buildDigestCard, previewText } from '../src/buildCard.js';
 import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze } from '../src/state.js';
 
 const NOW = new Date('2026-06-16T12:00:00Z');
@@ -46,6 +46,33 @@ test('isUnread is true only past the chat watermark', () => {
   assert.equal(isUnread({ chatId: 'oc_a', position: 99 }, watermark), false);  // before my reply
   assert.equal(isUnread({ chatId: 'oc_b', position: 5 }, watermark), true);    // no reply in that chat
   assert.equal(isUnread({ chatId: 'oc_a', position: 0 }, watermark), true);    // unknown position
+  // Thread/topic replies arrive as the "-3" sentinel — must NOT be read as
+  // already-read just because a watermark exists for the chat (regression).
+  assert.equal(isUnread({ chatId: 'oc_a', position: -3 }, watermark), true);
+});
+
+test('dedupeByChat keeps the latest message per chat and counts the rest', () => {
+  const t = (h) => new Date(`2026-06-16T${h}:00:00Z`);
+  const items = [
+    { chatId: 'oc_a', messageId: 'm1', position: 10, createTime: t('09') },
+    { chatId: 'oc_a', messageId: 'm2', position: 11, createTime: t('11') }, // latest in oc_a
+    { chatId: 'oc_a', messageId: 'm3', position: 9, createTime: t('08') },
+    { chatId: 'oc_b', messageId: 'm4', position: 5, createTime: t('10') },
+  ];
+  const out = dedupeByChat(items).sort((a, b) => a.chatId.localeCompare(b.chatId));
+  assert.equal(out.length, 2);
+  assert.equal(out[0].messageId, 'm2');       // newest of oc_a wins
+  assert.equal(out[0].chatUnreadCount, 3);     // three unread in oc_a
+  assert.equal(out[1].messageId, 'm4');
+  assert.equal(out[1].chatUnreadCount, 1);
+});
+
+test('previewText strips markup/placeholders, collapses whitespace, truncates', () => {
+  assert.equal(previewText('<p>hi   there</p>'), 'hi there');
+  assert.equal(previewText('look [Image: img_1] now'), 'look now');
+  assert.equal(previewText('line1\nline2'), 'line1 line2');
+  assert.equal(previewText('abcdef', 4), 'abc…');
+  assert.equal(previewText(''), '');
 });
 
 test('extractJson handles bare, fenced, and prefaced arrays; throws otherwise', () => {
@@ -76,9 +103,9 @@ test('markDone records ids and un-snoozes them', () => {
 test('buildDigestCard groups by urgency and caps the LOW bucket', () => {
   const lowCount = config.lowDisplayLimit + 2;
   const items = [
-    { n: 1, urgency: 'high', category: 'incident', summary: 'prod down', isDM: false, chatName: 'ops', link: 'https://x', createTime: NOW },
+    { n: 1, urgency: 'high', category: 'incident', summary: 'prod down', isDM: false, chatName: 'ops', senderName: 'Alice', text: 'checkout is throwing 500s', chatUnreadCount: 3, link: 'https://x', createTime: NOW },
     ...Array.from({ length: lowCount }, (_, i) => ({
-      n: i + 2, urgency: 'low', category: 'fyi', summary: `chatter ${i}`, isDM: true, chatName: 'Bob', link: null, createTime: NOW,
+      n: i + 2, urgency: 'low', category: 'fyi', summary: `chatter ${i}`, isDM: true, chatName: 'Bob', senderName: 'Bob', text: `note ${i}`, chatUnreadCount: 1, link: null, createTime: NOW,
     })),
   ];
 
@@ -88,6 +115,8 @@ test('buildDigestCard groups by urgency and caps the LOW bucket', () => {
   const text = JSON.stringify(card.elements);
   assert.ok(text.includes('HIGH PRIORITY'));
   assert.ok(text.includes('LOW / FYI'));
-  assert.ok(text.includes(`+2 more`)); // only lowDisplayLimit shown, remainder summarised
-  assert.ok(text.includes('hint'));    // footer
+  assert.ok(text.includes('more low/FYI'));   // low bucket: only lowDisplayLimit shown, rest summarised
+  assert.ok(text.includes('checkout is throwing 500s')); // verbatim message excerpt rendered
+  assert.ok(text.includes('Alice'));          // group sender prefixed on the excerpt
+  assert.ok(text.includes('hint'));           // footer
 });

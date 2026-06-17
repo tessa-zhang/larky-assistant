@@ -11,18 +11,38 @@ function md(text) {
   return String(text || '').replace(/([\\*_~`\[\]])/g, '\\$1');
 }
 
+/**
+ * The verbatim message, condensed to a single ~2-line excerpt: strip markup
+ * tags and non-text placeholders, collapse whitespace, truncate. Lets you read
+ * the actual wording without opening the chat (which would mark it read).
+ */
+export function previewText(text, max = 160) {
+  const s = String(text || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\[(?:Image|File|Video|Audio|Post|Card|Sticker)[^\]]*\]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
+}
+
 function itemLabel(item) {
-  const name = item.chatName || (item.isDM ? 'Direct message' : 'group');
-  return item.isDM ? `${name} · DM` : name;
+  if (item.isDM) return `${item.chatName || item.senderName || 'Direct message'} · DM`;
+  // Group: prefer the resolved chat name; until bot capability is enabled it's
+  // null, so fall back to whoever sent the latest unread message.
+  return item.chatName || (item.senderName ? `${item.senderName} · group` : 'group');
 }
 
 function itemBlock(item, now) {
   const meta = URGENCY_META[item.urgency] || URGENCY_META.low;
   const ago = relativeTime(item.createTime, now);
-  const header = `**${item.n}.** ${meta.emoji} **[${md(itemLabel(item))}]** · ${md(item.category)}${ago ? ` · ${ago}` : ''}`;
-  const summary = `"${md(item.summary)}"`;
+  const more = item.chatUnreadCount > 1 ? ` · +${item.chatUnreadCount - 1} more` : '';
+  const header = `**${item.n}.** ${meta.emoji} **[${md(itemLabel(item))}]** · ${md(item.category)}${ago ? ` · ${ago}` : ''}${more}`;
+  const summary = md(item.summary); // AI actionable
+  // For group messages, prefix the sender so you know who pinged you.
+  const raw = previewText(item.text, config.rawPreviewChars);
+  const rawLine = raw ? `\n💬 ${item.isDM ? '' : `**${md(item.senderName)}:** `}${md(raw)}` : '';
   const elements = [
-    { tag: 'div', text: { tag: 'lark_md', content: `${header}\n${summary}` } },
+    { tag: 'div', text: { tag: 'lark_md', content: `${header}\n${summary}${rawLine}` } },
   ];
   if (item.link) {
     elements.push({

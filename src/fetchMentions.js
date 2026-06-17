@@ -24,17 +24,26 @@ export function hasMeaningfulText(text) {
   return stripped.length > 0;
 }
 
+// Sender types that are automated noise (release bots, alert apps, etc.).
+// `--exclude-sender-type bot` drops only `bot`; `app` senders slip through the
+// API filter, so we also drop them here.
+const AUTOMATED_SENDER_TYPES = new Set(['bot', 'app']);
+
 function normalize(msg, { isDM }) {
   const text = (msg.content || '').trim();
   return {
     messageId: msg.message_id,
     chatId: msg.chat_id,
     // Per-chat monotonic sequence — used for the unread (reply-watermark) test.
+    // Thread/topic replies come back as the sentinel "-3" (not a real position);
+    // normalize keeps it as-is and isUnread() treats any non-positive value as
+    // "uncomparable ⇒ unread" rather than misreading it as already-read.
     position: parseInt(msg.message_position, 10) || 0,
     chatName: null, // resolved later, best-effort
     isDM,
     senderId: msg.sender?.id || null,
     senderName: msg.sender?.name || msg.sender?.id || 'Someone',
+    senderType: msg.sender?.sender_type || null,
     text,
     createTime: parseCreateTime(msg.create_time),
     // Lark gives us a real, working deep link per message — prefer it over
@@ -52,8 +61,27 @@ function normalize(msg, { isDM }) {
  */
 export function isUnread(item, watermark) {
   const latestOwn = watermark.get(item.chatId) || 0;
-  if (!item.position || !latestOwn) return true;
+  // position <= 0 means no comparable position (e.g. the "-3" thread sentinel),
+  // and no watermark means I never posted in that chat — both ⇒ treat as unread.
+  if (item.position <= 0 || !latestOwn) return true;
   return item.position > latestOwn;
+}
+
+/**
+ * Collapse to ONE row per chat — the latest unread message — mirroring Lark's
+ * "@ Mentions" tab (one entry per conversation). The representative carries
+ * `chatUnreadCount` so the card can show "+N more in chat".
+ */
+export function dedupeByChat(items) {
+  const byChat = new Map();
+  for (const it of items) {
+    const cur = byChat.get(it.chatId);
+    if (!cur) { byChat.set(it.chatId, { rep: it, count: 1 }); continue; }
+    cur.count++;
+    const newer = (it.createTime?.getTime() || 0) - (cur.rep.createTime?.getTime() || 0);
+    if (newer > 0 || (newer === 0 && it.position > cur.rep.position)) cur.rep = it;
+  }
+  return [...byChat.values()].map(({ rep, count }) => ({ ...rep, chatUnreadCount: count }));
 }
 
 /**
@@ -75,10 +103,11 @@ async function buildWatermark(self) {
 
 /**
  * Fetch UNREAD @mentions (group chats) and UNREAD DMs (p2p) addressed to the
- * user since `startISO`, normalized and filtered. "Unread" = not yet replied to
- * (reply-watermark proxy; Lark has no real read-state — see SPEC.md).
+ * user since `startISO`, normalized, filtered, and collapsed to one row per chat
+ * (latest unread). "Unread" = not yet replied to (reply-watermark proxy; Lark has
+ * no real read-state — see SPEC.md).
  *
- * Returns { items, skipped: { read, hidden, excludedChat, empty, capped } }.
+ * Returns { items, skipped: { read, hidden, automated, excludedChat, empty, capped } }.
  */
 export async function fetchSince(startISO, self, state) {
   const [mentionRaw, dmRaw, watermark] = await Promise.all([
@@ -101,11 +130,17 @@ export async function fetchSince(startISO, self, state) {
   let items = [...byId.values()];
 
   const hidden = hiddenMessageIds(state);
-  const skipped = { read: 0, hidden: 0, excludedChat: 0, empty: 0, capped: 0 };
+  const skipped = { read: 0, hidden: 0, automated: 0, excludedChat: 0, empty: 0, capped: 0 };
 
   // Unread filter (reply-watermark) — applies to BOTH mentions and DMs.
   items = items.filter((it) => {
     if (!isUnread(it, watermark)) { skipped.read++; return false; }
+    return true;
+  });
+
+  // Drop automated senders (bots + apps: release cards, alert apps, …).
+  items = items.filter((it) => {
+    if (AUTOMATED_SENDER_TYPES.has(it.senderType)) { skipped.automated++; return false; }
     return true;
   });
 
@@ -133,10 +168,13 @@ export async function fetchSince(startISO, self, state) {
     return true;
   });
 
+  // One row per chat (latest unread) — matches Lark's "@ Mentions" tab.
+  items = dedupeByChat(items);
+
   // Newest first; the digest re-sorts by urgency after classification.
   items.sort((a, b) => (b.createTime?.getTime() || 0) - (a.createTime?.getTime() || 0));
 
-  // Rate-limit guard: cap and report.
+  // Rate-limit guard: cap and report (caps chats now, post-dedup).
   if (items.length > config.maxMessages) {
     skipped.capped = items.length - config.maxMessages;
     items = items.slice(0, config.maxMessages);
