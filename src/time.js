@@ -9,9 +9,18 @@ const DATE_FORMAT = {
   hour: 'numeric', minute: '2-digit', hour12: true,
 };
 
-/** "Tue 16 Jun, 3:51 pm" — the one date format used in cards and messages. */
+/** "Tue 16 Jun, 3:51 pm" — date + time, used for the digest's generated-at title. */
 export function formatDateTime(date) {
   return date.toLocaleString('en-GB', DATE_FORMAT);
+}
+
+/**
+ * "Tue 16 Jun" — date only, no time. Used for the lookback-window label: it's a
+ * fixed N-hours-ago point whose time-of-day always mirrors "now", so showing the
+ * time made the window look static. The day is the meaningful part.
+ */
+export function formatDate(date) {
+  return date.toLocaleString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' });
 }
 
 /** Human elapsed time: "just now" / "45m ago" / "2h ago" / "3d ago". */

@@ -8,6 +8,8 @@ import { execFile } from 'node:child_process';
 
 const MAX_BUFFER = 64 * 1024 * 1024; // messages + cards can be large
 const MAX_SEARCH_PAGES = '40'; // auto-pagination ceiling for messages-search
+const REACTION_BATCH_SIZE = 20; // Lark caps reactions/batch_query at 20 message_ids/request
+const REACTION_PAGE_SIZE = 10; // Lark caps reactions returned per message at 10
 
 function runRaw(args) {
   return new Promise((resolve, reject) => {
@@ -105,6 +107,63 @@ export async function sendMessage({ as = 'user', userId, chatId, content, msgTyp
 
   const res = await runRaw(args);
   return res.data?.message_id || res.message_id || null;
+}
+
+/**
+ * Pure: from a `reactions batch_query` response's `success_msg_reaction_details`,
+ * the set of message_ids that `selfOpenId` has reacted to.
+ */
+export function reactedIdsFromDetails(details, selfOpenId) {
+  const out = new Set();
+  for (const det of details || []) {
+    const mine = (det.message_reaction_items || []).some(
+      (r) => r.operator?.operator_id === selfOpenId,
+    );
+    if (mine && det.message_id) out.add(det.message_id);
+  }
+  return out;
+}
+
+/**
+ * Of `messageIds`, return the subset the user (`selfOpenId`) has reacted to — a
+ * "read/addressed" signal alongside the reply watermark (see SPEC.md). Batched at
+ * 20 ids/request (Lark's batch_query cap), run concurrently. **Fails open** per
+ * batch: a lookup error leaves those messages un-marked (shown, never hidden) —
+ * losing the signal only re-surfaces a message the user can clear with `done`.
+ *
+ * Blind spot: `page_size_per_message` caps at 10, so on a message with >10
+ * reactions where the user's isn't in the first 10, the reaction is missed.
+ */
+export async function getReactedMessageIds(messageIds, selfOpenId) {
+  const ids = [...new Set(messageIds)].filter(Boolean);
+  if (!ids.length || !selfOpenId) return new Set();
+
+  const batches = [];
+  for (let i = 0; i < ids.length; i += REACTION_BATCH_SIZE) {
+    batches.push(ids.slice(i, i + REACTION_BATCH_SIZE));
+  }
+
+  const reacted = new Set();
+  await Promise.all(
+    batches.map(async (batch) => {
+      try {
+        const res = await runRaw([
+          'im', 'reactions', 'batch_query', '--as', 'user', '--json',
+          '--params', JSON.stringify({ user_id_type: 'open_id' }),
+          '--data', JSON.stringify({
+            queries: batch.map((message_id) => ({ message_id })),
+            page_size_per_message: REACTION_PAGE_SIZE,
+          }),
+        ]);
+        for (const id of reactedIdsFromDetails(res.data?.success_msg_reaction_details, selfOpenId)) {
+          reacted.add(id);
+        }
+      } catch {
+        // fail open: leave this batch's messages shown.
+      }
+    }),
+  );
+  return reacted;
 }
 
 /**

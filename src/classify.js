@@ -12,6 +12,8 @@ Urgency:
 - "medium": response needed but not time-critical — reviews, questions, feedback requests
 - "low": informational only, no action needed
 
+Broadcasts: a message with "is_broadcast": true was sent to a whole channel via @all — it is NOT directed at the user personally. Bias these to "low"/"fyi". Only use "medium" if it demands a concrete action the user must personally take (e.g. RSVP, fill a form by a deadline); only use "high" for a genuine incident/outage.
+
 Category:
 - "incident": something broken or degraded in production
 - "decision_needed": user's explicit approval or choice is required
@@ -23,7 +25,7 @@ Summary: One sentence, max 15 words, plain English. Focus on what the sender nee
 
 Input format:
 [
-  { "message_id": "...", "sender": "...", "chat_name": "...", "text": "..." },
+  { "message_id": "...", "sender": "...", "chat_name": "...", "is_broadcast": false, "text": "..." },
   ...
 ]
 
@@ -70,6 +72,7 @@ async function classifyChunk(client, items) {
     message_id: it.messageId,
     sender: it.senderName,
     chat_name: it.chatName || (it.isDM ? 'Direct message' : 'group'),
+    is_broadcast: !!it.isBroadcast, // @all blast — bias low (see system prompt)
     text: it.text.slice(0, 2000), // keep payload bounded
   }));
   const resp = await client.messages.create({

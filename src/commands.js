@@ -3,7 +3,7 @@ import { sendMessage } from './lark.js';
 import { buildDigestCard } from './buildCard.js';
 import { fetchSince } from './fetchMentions.js';
 import { classify } from './classify.js';
-import { formatDateTime, MS_PER_HOUR } from './time.js';
+import { formatDate, MS_PER_HOUR } from './time.js';
 import * as store from './state.js';
 
 /** Send text or an interactive card to the configured target. */
@@ -58,7 +58,7 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
   const { items, skipped } = await fetchSince(since, self, state);
 
   if (items.length === 0) {
-    await deliver(delivery, `✅ You're all caught up! No new unread mentions or DMs since ${formatDateTime(sinceDate)}.`);
+    await deliver(delivery, `✅ You're all caught up! No new unread mentions or DMs since ${formatDate(sinceDate)}.`);
     state.lastRunAt = runAt.toISOString();
     state.lastDigest = { generatedAt: runAt.toISOString(), since, items: [] };
     await store.save(state);

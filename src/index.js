@@ -53,6 +53,7 @@ function summarizeSkips(s) {
   if (!s) return '';
   const parts = [];
   if (s.read) parts.push(`${s.read} already-read (replied-since)`);
+  if (s.reacted) parts.push(`${s.reacted} reacted (addressed)`);
   if (s.automated) parts.push(`${s.automated} bot/app`);
   if (s.hidden) parts.push(`${s.hidden} hidden`);
   if (s.empty) parts.push(`${s.empty} empty/deleted`);

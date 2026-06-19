@@ -4,8 +4,10 @@ An on-demand triage assistant for Lark. It scans your **unread @mentions** (grou
 chats) and **unread DMs** (1:1 chats), classifies each by urgency with Claude,
 and delivers a prioritised **interactive card** — one row per chat, each showing
 the AI summary **plus the exact message text** and a deep link to jump straight
-to it — so you can triage without opening (and thereby reading) the chat. Plus
-`done` / `snooze` to keep the list clean.
+to it — so you can triage without opening (and thereby reading) the chat. Anything
+you've **replied to or reacted to** is treated as handled and won't reappear, and
+**@all** blasts are flagged and down-ranked. Plus `done` / `snooze` to keep the
+list clean.
 
 > See **[SPEC.md](SPEC.md)** for the authoritative requirements, the definition
 > of "unread" (a reply-watermark proxy — Lark exposes no real read-state), and
@@ -118,6 +120,13 @@ src/
   `message_position = "-3"`, which is treated as *uncomparable ⇒ unread* (a naive
   compare would wrongly drop ~half of @mentions). Lark has no read-state API, so
   this is the proxy. See [SPEC.md](SPEC.md).
+- **Reaction filter** (also = addressed): messages I've **reacted to** (any emoji)
+  are dropped too — `reactions batch_query` matched on my `open_id`. Reactions
+  *are* readable even though read-state isn't, so a 👍/✅ "got it" clears an item
+  without a reply.
+- **@all vs @me**: `--is-at-me` also returns **@all** blasts (Lark counts @all as
+  "at me"). A direct ping lists my `open_id` in `mentions[]`; an @all doesn't — so
+  @all items are kept but tagged **`📣 @all`** and biased toward low/fyi.
 - **Each card item** shows the AI summary **and the verbatim message** (truncated
   to ~2 lines) so you can triage without opening the chat — which would mark it
   read in Lark.

@@ -1,9 +1,9 @@
 import { URGENCY_ORDER, URGENCY_META, config } from './config.js';
-import { formatDateTime, relativeTime } from './time.js';
+import { formatDate, formatDateTime, relativeTime } from './time.js';
 
-/** Subtitle window phrase, e.g. "since Tue 16 Jun, 3:51 pm". */
+/** Subtitle window phrase, e.g. "since Tue 16 Jun" (date only — see formatDate). */
 function sinceText(windowStart) {
-  return windowStart ? `since ${formatDateTime(windowStart)}` : 'recently';
+  return windowStart ? `since ${formatDate(windowStart)}` : 'recently';
 }
 
 // Escape lark_md control chars in untrusted text so summaries render literally.
@@ -36,7 +36,10 @@ function itemBlock(item, now) {
   const meta = URGENCY_META[item.urgency] || URGENCY_META.low;
   const ago = relativeTime(item.createTime, now);
   const more = item.chatUnreadCount > 1 ? ` · +${item.chatUnreadCount - 1} more` : '';
-  const header = `**${item.n}.** ${meta.emoji} **[${md(itemLabel(item))}]** · ${md(item.category)}${ago ? ` · ${ago}` : ''}${more}`;
+  // @all broadcasts are kept but flagged so a channel-wide blast doesn't read as
+  // a personal ping (they're also biased low at classification).
+  const broadcast = item.isBroadcast ? ' · 📣 @all' : '';
+  const header = `**${item.n}.** ${meta.emoji} **[${md(itemLabel(item))}]** · ${md(item.category)}${broadcast}${ago ? ` · ${ago}` : ''}${more}`;
   const summary = md(item.summary); // AI actionable
   // For group messages, prefix the sender so you know who pinged you.
   const raw = previewText(item.text, config.rawPreviewChars);

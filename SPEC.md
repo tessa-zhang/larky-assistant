@@ -6,12 +6,55 @@
 
 ---
 
+## Requirements & progress (start here)
+
+Living checklist — the at-a-glance "where are we." Tick items as they ship; new
+feedback lands as a **Roadmap** item (bottom), then graduates up here once built.
+
+**✅ Shipped**
+- [x] Unread @mentions (group) + DMs digest, on demand
+- [x] "Unread" via reply-watermark proxy (+ `-3` thread-reply sentinel handling)
+- [x] **Reactions = addressed** — drop messages I've reacted to *(2026-06-17)*
+- [x] **@all detection** — tag `📣 @all` + bias low; kept, not dropped *(2026-06-17)*
+- [x] AI urgency / category / ≤15-word summary classification
+- [x] Interactive card: urgency-grouped, numbered, verbatim excerpt, jump link
+- [x] `done` / `snooze` text commands (re-render from cached snapshot)
+- [x] Fixed 3-day lookback window (re-surfaces current backlog each run)
+- [x] Bot/app + noise-channel filtering; per-run cap with skip reporting
+- [x] Local JSON state, no DB
+- [x] **Jump-button link fix** — Lark emits a broken `/client/thread/open` applink
+      for thread messages; rebuild it as a working `/client/chat/open` link *(2026-06-18)*
+- [x] **Date-only lookback label** — drop the time from the "since …" subtitle (it's
+      a fixed window, so the time looked static) *(2026-06-18)*
+
+**🔜 Next** (detail in [Roadmap](#roadmap))
+- [ ] **R4 — Thread-aware unread** (bug fix): per-thread watermark so thread @s clear
+      when I engage *that thread* — and don't vanish when I post elsewhere (folds Item A)
+- [ ] **R6 — Per-chat multi-message summary**: summarise across all unread in a chat,
+      not just the latest (verbatim line still shows the latest)
+- [ ] **R5 — cc-mention down-ranking**: detect textual `cc @me`, tag + bias low (3rd
+      lane alongside @all)
+- [ ] **R3 — Concise / expandable digest** (should-have): collapse the digest so a
+      14-item run stays scannable instead of a wall of text
+- [ ] **R7 — Interactive per-item done/snooze**: per-row buttons; `done` drops a ✅
+      reaction so it survives without a global list (needs callback spike + R2)
+- [ ] **R8 — Dynamic lookback** (to design): start-of-week moving window; track every
+      unaddressed @ so nothing ages out silently
+- [ ] **R1 — Priority groups** (should-have, opt-in): surface/consider non-@
+      messages from groups I designate as relevant
+- [ ] **R2 — Hosted bot** (committed direction): frictionless, installable + runnable
+      *without an IDE*, ideally entirely inside Lark
+
+---
+
 ## Goal
 
 On demand, surface **everything addressed to me that I haven't dealt with yet**
 — my **unread @mentions** and **unread DMs** — classify them by urgency with AI,
 and deliver one prioritised, interactive digest card I can act on (jump / done /
-snooze). Read/handled chatter must not appear.
+snooze). Read/handled chatter must not appear. **Reacting** to a message counts as
+handling it; **@all** broadcasts are kept but flagged and down-ranked (they're not
+personally directed).
 
 ## User story
 
@@ -56,20 +99,65 @@ the minute-granularity `create_time`).
 is treated as *uncomparable ⇒ unread*. (~half of @mentions are thread replies, so
 this matters a lot.)
 
-**Layered with two more filters**, an item is shown only if ALL hold:
-1. **Unread** by the watermark rule (above).
+### The reaction rule (also = "addressed")
+
+> A message I've **reacted to** (any emoji) is treated as **read/addressed** and
+> dropped, exactly like one I replied to.
+
+Same family as the watermark, but **per-message** rather than a chat watermark:
+reacting to message X addresses X only — not earlier messages I didn't react to.
+A 👍 / ✅ / 👀 is how people acknowledge "got it" without replying, so honouring
+it removes a whole class of false positives.
+
+Unlike read-state, reactions **are** readable: `im reactions batch_query --as user`
+returns each reaction's `operator.operator_id`, so we detect *my own* reactions by
+matching my `open_id`. Mechanics: batched at **20 message_ids/request** (the API
+cap), run concurrently, applied to the smallest candidate set (after the local +
+name filters) to minimise calls. **Fails open** — a lookup error leaves messages
+shown, never hidden. *Blind spot:* `page_size_per_message` caps at 10, so a message
+with >10 reactions where mine isn't in the first 10 is missed (rare; re-surfaces
+once, clearable with `done`).
+
+**Layered with the other filters**, an item is shown only if ALL hold:
+1. **Unread** by the watermark rule **and not reacted to** by me (above).
 2. **Not** in `doneMessageIds` and **not** currently snoozed.
 3. Within the **lookback window** — a **fixed** `LOOKBACK_HOURS` (default **72h /
    3 days**): `start = now − LOOKBACK_HOURS`, **independent of when the digest last
    ran**. Running a digest doesn't read anything, so each run must re-surface the
    whole current unread backlog in the window — not just messages newer than the
-   last run. Items leave the digest only by replying (watermark), `done`, or
-   `snooze`.
+   last run. Items leave the digest only by replying (watermark), reacting, `done`,
+   or `snooze`.
 
-**Known blind spot (irreducible):** a message I *read but never replied to*
-(e.g. a "sureee" closer, or a group @mention I read silently) will appear once.
+**Known blind spot (irreducible):** a message I *read but never replied or reacted
+to* (e.g. a "sureee" closer, or a group @mention I read silently) will appear once.
 I clear it with `done`, or it ages out of the window. This is the unavoidable
-cost of Lark having no read API.
+cost of Lark having no read API. *(Separately — and **not** irreducible — replying
+**in a thread** currently doesn't clear the mention: pure in-thread replies report
+`message_position = "-3"`, defeating the watermark on both sides. Fixable via a
+per-thread watermark; tracked as **R4**.)*
+
+---
+
+## @mentions vs @all (broadcasts)
+
+Lark's "@ Mentions" tab — and therefore `--is-at-me` — counts **@all** as "at me"
+(it includes everyone). Measured on a real 2-week window, **~11%** of returned
+"mentions" were `@all` blasts, not someone naming me. They were being classified
+identically to a direct ping.
+
+The two are **cleanly separable** by structure, not fragile text-matching:
+a **direct @me** always carries my `open_id` in the message's `mentions[]` array;
+an **@all** never does (it only renders `@all`/`@_all` as text). So:
+
+> `isBroadcast = (group message) AND (my open_id ∉ mentions[])`. DMs are never
+> broadcasts.
+
+**Decision: keep, but flag + down-rank.** Broadcasts stay in the digest (some
+all-hands posts matter) but are tagged **`📣 @all`** on the card and biased toward
+**low/fyi** at classification — they may only reach `medium` when they demand a
+concrete action from me (RSVP, form by a deadline) and `high` only for a genuine
+incident. The down-rank rides the existing LOW-bucket cap, so broadcast noise
+self-limits.
 
 ---
 
@@ -95,10 +183,19 @@ lark-cli im +messages-search --as user --sender <SELF_OPEN_ID> \
 
 `content` is already decoded plain text. Each message has `message_id`,
 `chat_id`, `message_position`, `create_time`, `sender{id,name,sender_type}`,
-`mentions[]`, and **`message_app_link`** (use verbatim for the Jump button).
+`mentions[]`, **`thread_id` + `thread_message_position`** (present on thread/topic
+messages), and **`message_app_link`**. The applink is used verbatim for the Jump
+button on **non-thread** messages, but for thread messages Lark emits a **malformed
+`/client/thread/open`** link that won't navigate — we rebuild it as a working
+`/client/chat/open?openChatId=…&position=…` link from `chat_id` + `message_position`
+(see `jumpLink` and the limitations table).
 
 ### Filtering after fetch
 - Apply the **watermark rule** to mentions **and** DMs.
+- Drop messages I've **reacted to** (reaction rule) — `reactions batch_query`,
+  matched on my `open_id`, on the post-filter candidate set.
+- Mark group messages where my `open_id` ∉ `mentions[]` as **`isBroadcast`** (@all);
+  keep them, but they're labelled and down-ranked downstream.
 - Drop my own messages (`sender.id == SELF`).
 - Drop **automated senders** — `sender_type` of `bot` *or* `app`. The
   `--exclude-sender-type bot` search flag drops only `bot`; `app` senders (release
@@ -133,10 +230,13 @@ focused on what the sender needs from me.
 or choice required), `review_request` (PRD/doc/code/design), `question` (I'm being
 asked something), `fyi` (informational only).
 
-In the **agent-driven skill** the agent classifies inline; in the **Node app** a
-chunked Claude call (`claude-sonnet-4-6`, ≤40 msgs/call, run concurrently) does
-it, with a `low`/`fyi` fallback so a message is never dropped on a parse error or
-when no API key is set.
+**Broadcast bias** — each message carries an `is_broadcast` flag (the @all signal
+above). Broadcasts are biased to `low`/`fyi`; they reach `medium` only when they
+demand a concrete action from me, `high` only for a genuine incident.
+
+A chunked Claude call (`claude-sonnet-4-6`, ≤40 msgs/call, run concurrently) does
+the classification, with a `low`/`fyi` fallback so a message is never dropped on a
+parse error or when no API key is set.
 
 ---
 
@@ -146,8 +246,9 @@ Lark interactive card. Grouped 🔴 HIGH / 🟡 MEDIUM / 🟢 LOW, **items numbe
 1..N globally** (numbers are how `done`/`snooze` reference items). One row per
 chat (latest unread). Each item:
 - label `[chat name]` for groups (falls back to `[sender · group]` until bot
-  capability resolves names) or `[sender · DM]` for DMs, plus category, relative
-  time, and `· +N more` when the chat has further unread messages;
+  capability resolves names) or `[sender · DM]` for DMs, plus category, a
+  **`📣 @all`** tag when `isBroadcast`, relative time, and `· +N more` when the
+  chat has further unread messages;
 - the AI **summary** (what the sender needs from me);
 - the **verbatim message** beneath it — `💬 <sender>: "<excerpt>"`, truncated to
   `RAW_PREVIEW_CHARS` (≈2 lines) — so I can triage without opening the chat (which
@@ -160,8 +261,9 @@ LOW bucket capped (~10) with a "+N more" note. Empty state → `✅ You're all c
 
 ## Done / Snooze (text commands)
 
-There are **no card-button callbacks** over the lark-cli WebSocket event bus, so
-management is by text reply referencing the card numbers:
+There are **no card-button callbacks** over the lark-cli WebSocket event bus *(to be
+re-verified in R7 — Lark does emit `card.action.trigger`)*, so today management is by
+text reply referencing the card numbers:
 
 - `done 2 3` → add to `doneMessageIds`; never resurface.
 - `snooze 1` → hide for `SNOOZE_HOURS` (default 24h), then resurface if still unread.
@@ -171,7 +273,7 @@ resent** (not edited in place); survivors are renumbered.
 
 ---
 
-## State (`~/.lark-triage/state.json` for the skill; `./state.json` for the app)
+## State (`./state.json`)
 
 ```json
 {
@@ -199,9 +301,9 @@ resent** (not edited in place); survivors are renumbered.
 - **All Lark calls:** shell out to `lark-cli`; it owns token storage + refresh.
 - **Send identity:** `SEND_AS=user` → digest to my **self-chat** (works today);
   `SEND_AS=bot` → bot replies in its DM (needs bot scopes + published version).
-- Two delivery forms of the same logic: the **`lark-triage` skill** (agent
-  classifies inline, on-demand) and the **Node app** (`npm run digest|listen`,
-  unattended/scheduled).
+- **One surface:** the **Node app** is the sole delivery form today (`npm run
+  digest|listen`, unattended/scheduled); it gets wrapped behind the hosted bot at
+  R2. *(An earlier standalone Claude skill was retired — one codebase to maintain.)*
 
 ## Configuration (env vars — see `.env.example`)
 
@@ -224,13 +326,17 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 
 | Want | Reality |
 |---|---|
-| True unread / read state | **Not exposed** by any Lark API (messaging or feed) |
+| True unread / read state on *received* msgs | **Not exposed.** The only read API is `messages read_users` — **bot-only**, only for messages the **bot sent**, ≤7 days. No "have I read this?" exists. `chats.get` has no read cursor; `chat-list` has no unread field. |
 | Unread badge / count per chat | **Not exposed**; client-side only |
+| **My reactions on a message** | **Readable** ✅ — `reactions batch_query --as user` (cap 20 msgs/req, ≤10 reactions/msg); match `operator.operator_id` to my `open_id` |
+| Tell @all from a direct @mention | `--is-at-me` returns both; distinguish by whether my `open_id` ∈ `mentions[]` |
 | Enumerate all my chats (`chat-list`) | Needs **Bot capability** activated (error `232025`) |
 | Resolve group chat names | Needs bot capability + `im:chat:readonly` |
 | Send as bot | Needs `im:message:send_as_bot` + `im:message` on a **published** version |
 | `messages-search` time format | Numeric offset, no ms (`+00:00`); `.sssZ` → `99992402` |
 | Patch/edit a sent card | No message-patch method → re-render + resend |
+| Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+…) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, so fully reconstructable from `chat_id`+`message_position`) |
+| Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies (the watermark axis breaks); **`thread_message_position`** is a real per-thread sequence usable for a per-thread watermark (R4). Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both |
 
 ## Non-functional requirements
 
@@ -252,7 +358,132 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 - **Auth resilience** — owned by `lark-cli`; a `needs_refresh` token is still
   usable (it refreshes on the next API call), so runs don't fail on it.
 
+## Roadmap
+
+Committed directions + parked ideas, each with an ID the progress tracker refers
+to. We assess before building — these capture **intent**, not final design.
+
+### R1 — Priority groups (should-have, configurable / optional)
+
+Today only **direct @mentions** and **DMs** surface. But as PM of Project A, every
+Project A thread is at least worth *consideration* even when no one @'d me. Let the
+user designate **priority groups**; messages there get evaluated too.
+
+- **Optional & off by default** — opt in per group; never forces volume on people
+  who don't want it.
+- **Open questions:** how to pick groups (chat_id list vs name vs in-Lark picker);
+  how hard to surface (every message? AI-filtered for "would Tessa actually care?");
+  volume control (priority groups are chatty → a strong relevance filter + caps are
+  essential); how it composes with the watermark/reaction rules; chat enumeration
+  needs bot capability (ties to R2).
+
+### R2 — Hosted bot: frictionless, no-IDE, inside Lark (committed 2026-06-17)
+
+**Decision:** the delivery form is a **hosted bot**, not a per-user CLI —
+"otherwise no one will be free enough to use it." A teammate must be able to
+**install and run it without an IDE**, ideally entirely within Lark (DM the bot
+`digest`). **Prioritise frictionless setup above everything else.**
+
+- **Implies:** bot capability activated (✅ confirmed 2026-06-17 — `232025` is
+  gone), then the app must **apply the scopes + publish a version**. Verified
+  missing scopes as of 2026-06-17:
+  - *Send as bot:* `im:message:send`, `im:message`, `im:message:send_as_bot`
+  - *Chat names + enumeration (labels + R1):* `im:chat:readonly`, `im:chat`,
+    `im:chat.group_info:readonly`, `im:chat:read`
+  - *(Event consumer for in-Lark `digest`/`done` commands will also want a message
+    read scope, e.g. `im:message.p2p_msg:readonly` — confirm when we wire it.)*
+  Reading mentions/DMs/reactions already works on the **user** token (no change).
+- **Key design problem:** per-user auth — each teammate's digest needs *their own*
+  user-identity context to read *their* mentions/DMs. Onboarding that without an
+  IDE/CLI is the crux. To brainstorm next.
+
+### R3 — Concise / expandable digest (should-have, added 2026-06-18)
+
+A busy digest is a wall of text: each row is header + AI summary + verbatim excerpt
++ a Jump button, so ~14 items overflow the card and stop being scannable. Make
+detail collapse by default and expand on demand.
+
+- **Lark card capability to explore:** the v2 card schema has a `collapsible_panel`
+  component (and column sets) — the cleanest fit if supported on the delivery
+  surface. Fallbacks if not: hide the verbatim excerpt behind "show more" (summary
+  stays), or render dense one-line-per-chat rows.
+- **Open question / tension:** density vs. the core "triage *without opening the
+  chat*" goal, which depends on the verbatim excerpt being visible. Likely answer:
+  keep HIGH expanded, collapse MEDIUM/LOW. Assess against real card limits before
+  building.
+
+### R4 — Thread-aware unread, both directions (bug fix, queued 2026-06-18)
+
+Our watermark is per-**chat**, not per-**thread**, so thread @mentions misfire in
+*both* directions:
+- **False positive:** replying *in a thread* doesn't clear the mention — pure
+  in-thread replies report `message_position = "-3"`, so the reply-watermark can't
+  compare them, and my own in-thread reply is `-3` too, so it never raises the
+  watermark. (The link fix shipped 2026-06-18 makes these at least **clickable**.)
+- **False negative (Item A, 2026-06-18):** an *unanswered* thread @ can vanish
+  because posting *anything* elsewhere in that chat raises the per-chat watermark
+  past it — even though I never engaged *that* thread. Expected: keep it until I
+  engage *that thread*.
+
+- **Fix (both):** add a **per-thread watermark** — `thread_id → max(thread_message_position)`
+  built from my own messages — alongside the chat watermark, and scope "read" to
+  the thread for thread messages. A candidate is "read" if it falls under the
+  watermark on the axis it actually has a real position on.
+- **Verified viable:** my own thread replies carry a real `thread_message_position`
+  (14/100 in a 14-day sample). Residual blind spot: messages where *both* positions
+  are sentinels (rare) still surface once — clearable with `done`.
+
+### R5 — cc-mention down-ranking (should-have, added 2026-06-18)
+
+Beyond @all, there's a third lane: being **cc'd** — the sender types `cc @A @B @me`
+to copy me for visibility, not to ask me to act. Lark exposes **no structural cc
+signal** (`mentions[]` is just `id`/`key`/`name`), but the convention is textual:
+a `cc` token followed by the @mentions. Detect it by a simple read of the message
+text, then treat it like a broadcast — **tag (`👀 cc`) + bias `low`/`fyi`** at
+classification (only reaching higher when it genuinely asks something of me).
+
+- **Open:** detection precision (word-boundary `cc` near a mention vs. anywhere);
+  whether to compute the flag heuristically (deterministic, drives the card tag) or
+  let the classifier judge from text (it already sees it) — likely the heuristic
+  flag for the tag + a prompt nudge, mirroring `is_broadcast`.
+
+### R6 — Per-chat multi-message summary (should-have, added 2026-06-18)
+
+Today we collapse a chat to its latest unread message and the AI summarises only
+that one; the `+N more` count is real but the other messages' content is discarded.
+Summarise across **all** unread messages in the chat instead ("3 msgs: needs
+sign-off on X, plus a follow-up on Y"). **Decided:** the verbatim `💬` line keeps
+showing the **latest** message; only the AI summary spans the bundle. Pairs with
+R4, and softens Item A's multiple-@ collapse (earlier @ content stops being
+invisible). Cost: a bit more classification payload per chat — fine.
+
+### R7 — Interactive per-item done/snooze (should-have, added 2026-06-18)
+
+Replace the text-command `done 2 3` flow with **per-row buttons** on the card.
+- **Feasibility spike first:** SPEC currently records "no card-button callbacks over
+  the lark-cli WS bus" — re-verify, since Lark cards emit `card.action.trigger`
+  events; confirm whether we can receive them (user vs bot identity). Likely couples
+  to R2 (publish + scopes).
+- **State model (decided — option b):** a `done` click drops a ✅ **reaction** on the
+  message (bot, on my behalf), so the existing reaction-rule treats it as addressed
+  on the next run — per-item buttons **without** a growing `doneMessageIds` list and
+  **without** losing the "never resurfaces" guarantee. Needs a reaction-write scope.
+
+### R8 — Dynamic lookback window (to design, added 2026-06-18)
+
+The fixed 72h lookback should be a **fallback**, not the curator. Direction Tessa
+wants: a **moving window anchored to the start of the week**, so a week's @s/tasks
+stay visible until cleared — and ideally **persistently track every unaddressed @**
+so nothing is silently dropped when it ages out, with the lookback only bounding how
+far back a *cold* scan reaches. **To discuss before building** — interacts with the
+stateless-window design (today a run reads nothing and re-derives the backlog) and
+with how items leave (reply/react/done). Quick phrasing fix shipped first
+(2026-06-18): the lookback label is now date-only.
+
+---
+
 ## Out of scope (for now)
 
-Scheduled auto-delivery (later via cron), multi-user, keyword filters
-(`digest urgent`), true unread (blocked by Lark API), in-place card editing.
+True unread (blocked by Lark API — see the limitations table), in-place card
+editing, keyword filters (`digest urgent`), scheduled cron auto-delivery.
+*(Multi-user and "run without an IDE" are no longer out of scope — they're **R2**.)*
