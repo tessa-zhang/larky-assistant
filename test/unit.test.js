@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { relativeTime, formatDateTime, formatDate, MS_PER_HOUR } from '../src/time.js';
 import { isExcludedChatName, config } from '../src/config.js';
-import { hasMeaningfulText, isUnread, dedupeByChat, mentionsUser, jumpLink } from '../src/fetchMentions.js';
+import { hasMeaningfulText, isUnread, dedupeByChat, mentionsUser, jumpLink, parsePosition } from '../src/fetchMentions.js';
 import { reactedIdsFromDetails } from '../src/lark.js';
 import { extractJson } from '../src/classify.js';
 import { buildDigestCard, previewText } from '../src/buildCard.js';
@@ -46,23 +46,39 @@ test('hasMeaningfulText ignores placeholder-only content', () => {
   assert.equal(hasMeaningfulText('see this [Image: img_1] please'), true);
 });
 
-test('isUnread is true only past the chat watermark (main axis)', () => {
+test('parsePosition keeps real 0-indexed positions, nulls sentinels and missing', () => {
+  assert.equal(parsePosition('0'), 0);       // first message in a chat — a REAL position
+  assert.equal(parsePosition('42'), 42);
+  assert.equal(parsePosition(7), 7);
+  assert.equal(parsePosition('-3'), null);    // pure in-thread reply sentinel
+  assert.equal(parsePosition(undefined), null);
+  assert.equal(parsePosition(null), null);
+  assert.equal(parsePosition(''), null);
+  assert.equal(parsePosition('abc'), null);
+});
+
+test('isUnread compares on the main axis; position 0 is real, null is uncomparable', () => {
   const watermark = { chat: new Map([['oc_a', 100]]), thread: new Map() };
   assert.equal(isUnread({ chatId: 'oc_a', position: 101 }, watermark), true);  // newer than my reply
   assert.equal(isUnread({ chatId: 'oc_a', position: 100 }, watermark), false); // my reply itself
   assert.equal(isUnread({ chatId: 'oc_a', position: 99 }, watermark), false);  // before my reply
   assert.equal(isUnread({ chatId: 'oc_b', position: 5 }, watermark), true);    // no reply in that chat
-  assert.equal(isUnread({ chatId: 'oc_a', position: 0 }, watermark), true);    // unknown position
-  // Non-thread "-3" sentinel: no comparable main position ⇒ unread (regression).
-  assert.equal(isUnread({ chatId: 'oc_a', position: -3 }, watermark), true);
+  // REGRESSION (Henry/Saddam DMs): a position-0 first message I replied to
+  // (watermark 1) must clear — a real 0 is NOT "missing".
+  const wm0 = { chat: new Map([['oc_c', 1]]), thread: new Map() };
+  assert.equal(isUnread({ chatId: 'oc_c', position: 0 }, wm0), false);          // 0 < my reply 1 ⇒ read
+  assert.equal(isUnread({ chatId: 'oc_c', position: 0 }, { chat: new Map(), thread: new Map() }), true); // not replied yet
+  // null position = "-3" sentinel / missing ⇒ no comparable position ⇒ unread.
+  assert.equal(isUnread({ chatId: 'oc_a', position: null }, watermark), true);
 });
 
 test('isUnread scopes thread messages to the per-thread watermark (R4)', () => {
   // I replied in thread omt_1 (up to thread_position 12) but never in omt_2.
   // I also posted recently on oc_a's MAIN timeline (chat watermark 100).
   const watermark = { chat: new Map([['oc_a', 100]]), thread: new Map([['omt_1', 12]]) };
+  // Pure in-thread reply: no main position (null), real thread position.
   const threadMsg = (threadPosition, threadId = 'omt_1') =>
-    ({ chatId: 'oc_a', position: -3, threadId, threadPosition }); // pure in-thread reply: main = -3
+    ({ chatId: 'oc_a', position: null, threadId, threadPosition });
 
   // Bug-fix #1 (false positive): an in-thread reply now clears the mention.
   assert.equal(isUnread(threadMsg(10), watermark), false); // 10 <= my thread reply 12 ⇒ read
@@ -73,13 +89,13 @@ test('isUnread scopes thread messages to the per-thread watermark (R4)', () => {
   // I posted on oc_a's main timeline (chat watermark must be ignored here).
   assert.equal(isUnread(threadMsg(7, 'omt_2'), watermark), true);
 
-  // Residual blind spot: both positions sentinel (no real thread position) ⇒
-  // falls through to the main axis as the "-3" sentinel ⇒ unread, surfaces once.
-  assert.equal(isUnread({ chatId: 'oc_a', position: -3, threadId: 'omt_1', threadPosition: 0 }, watermark), true);
+  // No real position on either axis (sentinel main + no thread position) ⇒
+  // main axis sees a null position ⇒ unread, surfaces once (clearable with done).
+  assert.equal(isUnread({ chatId: 'oc_a', position: null, threadId: 'omt_1', threadPosition: null }, watermark), true);
 
   // A thread message mirrored to main (real message_position, no thread position)
   // still clears via the chat watermark — it's genuinely visible on main.
-  assert.equal(isUnread({ chatId: 'oc_a', position: 80, threadId: 'omt_1', threadPosition: 0 }, watermark), false);
+  assert.equal(isUnread({ chatId: 'oc_a', position: 80, threadId: 'omt_1', threadPosition: null }, watermark), false);
 });
 
 test('mentionsUser detects a direct @me but not an @all broadcast', () => {

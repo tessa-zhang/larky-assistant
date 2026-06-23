@@ -29,6 +29,11 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
 - [x] **R4 — Thread-aware unread** (bug fix): per-thread watermark so thread @s clear
       when I engage *that thread* — and don't vanish when I post elsewhere (folds Item A)
       *(2026-06-23)*
+- [x] **Position-0 unread fix** (bug): Lark `message_position` is **0-indexed**, so a
+      chat's first message is `"0"` — it was conflated with "missing" and treated as
+      permanently unread (a replied-to first DM kept resurfacing). A real `0` now
+      compares against the watermark like any position; only the `-3` sentinel and a
+      truly absent value are uncomparable. *(2026-06-23)*
 
 **🔜 Next** (detail in [Roadmap](#roadmap))
 - [ ] **R6 — Per-chat multi-message summary**: summarise across all unread in a chat,
@@ -347,6 +352,7 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | Resolve group chat names | Needs bot capability + `im:chat:readonly` |
 | Send as bot | Needs `im:message:send_as_bot` + `im:message` on a **published** version |
 | `messages-search` time format | Numeric offset, no ms (`+00:00`); `.sssZ` → `99992402` |
+| `message_position` indexing | **0-indexed** — a chat's first message is `"0"`, a real comparable value. Only the `-3` thread sentinel and a missing/garbage value are uncomparable. Don't conflate a real `0` with "absent" (use `parsePosition` → integer-or-`null`, not `parseInt() \|\| 0`), or a replied-to first message sticks forever |
 | Patch/edit a sent card | No message-patch method → re-render + resend |
 | Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+…) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, so fully reconstructable from `chat_id`+`message_position`) |
 | Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies, so they're watermarked on **`thread_message_position`** (a real per-thread sequence) via the per-thread watermark — **shipped, R4**. Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both — so a message with neither still surfaces once (residual) |

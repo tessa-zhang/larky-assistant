@@ -60,22 +60,36 @@ export function jumpLink(msg) {
   return `${host}/client/chat/open?openChatId=${encodeURIComponent(msg.chat_id)}${posParam}`;
 }
 
+/**
+ * Parse a Lark `message_position` / `thread_message_position` into a comparable
+ * integer, or `null` when it carries no real position.
+ *
+ * Lark message positions are **0-indexed** — the first message in a chat is `"0"`,
+ * a genuine value that must compare normally (a reply at position 1 reads it). So
+ * we must NOT collapse a real `0` into the same bucket as "missing". Uncomparable
+ * cases — which return `null` — are the `-3` thread sentinel (a pure in-thread
+ * reply has no main-timeline position) and an absent/garbage value. See SPEC.md.
+ */
+export function parsePosition(raw) {
+  const n = parseInt(raw, 10);
+  return Number.isNaN(n) || n < 0 ? null : n;
+}
+
 function normalize(msg, { isDM, selfOpenId }) {
   const text = (msg.content || '').trim();
   return {
     messageId: msg.message_id,
     chatId: msg.chat_id,
     // Per-chat monotonic sequence — the MAIN-timeline axis of the watermark test.
-    // Thread/topic replies come back as the sentinel "-3" (not a real position);
-    // normalize keeps it as-is and isUnread() treats any non-positive value as
-    // "uncomparable on the main axis".
-    position: parseInt(msg.message_position, 10) || 0,
+    // `null` = no comparable main position (the "-3" sentinel or missing); a real
+    // `0` is kept as 0 (positions are 0-indexed). See parsePosition + isUnread.
+    position: parsePosition(msg.message_position),
     // Thread axis (R4). A thread/topic message also carries a `thread_id` and a
-    // per-thread monotonic `thread_message_position`. A pure in-thread reply has
-    // a real thread position but `message_position = -3`, so isUnread() scopes its
-    // read-ness to the per-thread watermark instead of the per-chat one. 0 = absent.
+    // per-thread monotonic `thread_message_position`. A pure in-thread reply has a
+    // real thread position but `message_position = "-3"`, so isUnread() scopes its
+    // read-ness to the per-thread watermark instead of the per-chat one. null = absent.
     threadId: msg.thread_id || null,
-    threadPosition: parseInt(msg.thread_message_position, 10) || 0,
+    threadPosition: parsePosition(msg.thread_message_position),
     chatName: null, // resolved later, best-effort
     isDM,
     // @all broadcast (group message that didn't name me directly). Kept, but
@@ -114,17 +128,18 @@ function normalize(msg, { isDM, selfOpenId }) {
 export function isUnread(item, watermark) {
   // Thread axis: the message lives in a thread and carries a real per-thread
   // position — compare only against my latest reply in THAT thread.
-  if (item.threadId && item.threadPosition > 0) {
-    const ownThread = watermark.thread.get(item.threadId) || 0;
-    if (!ownThread) return true; // never engaged this thread ⇒ unread
+  if (item.threadId && item.threadPosition != null) {
+    const ownThread = watermark.thread.get(item.threadId);
+    if (ownThread == null) return true; // never engaged this thread ⇒ unread
     return item.threadPosition > ownThread;
   }
   // Main axis: non-thread messages + thread messages mirrored to main.
-  const ownChat = watermark.chat.get(item.chatId) || 0;
-  // position <= 0 means no comparable main position (the "-3" sentinel with no
-  // real thread position either), and no watermark means I never posted in that
-  // chat — both ⇒ treat as unread.
-  if (item.position <= 0 || !ownChat) return true;
+  // position == null ⇒ no comparable main position (the "-3" sentinel or missing);
+  // ownChat == null ⇒ I never posted in this chat — both ⇒ treat as unread.
+  // NB: position 0 is REAL (Lark positions are 0-indexed) and compares normally —
+  // a first message I replied to (watermark ≥ 1) must clear, not stick forever.
+  const ownChat = watermark.chat.get(item.chatId);
+  if (item.position == null || ownChat == null) return true;
   return item.position > ownChat;
 }
 
@@ -140,7 +155,7 @@ export function dedupeByChat(items) {
     if (!cur) { byChat.set(it.chatId, { rep: it, count: 1 }); continue; }
     cur.count++;
     const newer = (it.createTime?.getTime() || 0) - (cur.rep.createTime?.getTime() || 0);
-    if (newer > 0 || (newer === 0 && it.position > cur.rep.position)) cur.rep = it;
+    if (newer > 0 || (newer === 0 && (it.position ?? -1) > (cur.rep.position ?? -1))) cur.rep = it;
   }
   return [...byChat.values()].map(({ rep, count }) => ({ ...rep, chatUnreadCount: count }));
 }
@@ -160,10 +175,12 @@ async function buildWatermark(self) {
   const chat = new Map();
   const thread = new Map();
   for (const m of mine) {
-    const pos = parseInt(m.message_position, 10) || 0;
-    if (pos > (chat.get(m.chat_id) || 0)) chat.set(m.chat_id, pos);
-    const tpos = parseInt(m.thread_message_position, 10) || 0;
-    if (m.thread_id && tpos > (thread.get(m.thread_id) || 0)) thread.set(m.thread_id, tpos);
+    // `?? -1` so a legitimate position 0 (a chat's first message) is still recorded
+    // as the watermark rather than dropped (0 > 0 would be false). See parsePosition.
+    const pos = parsePosition(m.message_position);
+    if (pos != null && pos > (chat.get(m.chat_id) ?? -1)) chat.set(m.chat_id, pos);
+    const tpos = parsePosition(m.thread_message_position);
+    if (m.thread_id && tpos != null && tpos > (thread.get(m.thread_id) ?? -1)) thread.set(m.thread_id, tpos);
   }
   return { chat, thread };
 }
