@@ -26,10 +26,11 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       for thread messages; rebuild it as a working `/client/chat/open` link *(2026-06-18)*
 - [x] **Date-only lookback label** — drop the time from the "since …" subtitle (it's
       a fixed window, so the time looked static) *(2026-06-18)*
+- [x] **R4 — Thread-aware unread** (bug fix): per-thread watermark so thread @s clear
+      when I engage *that thread* — and don't vanish when I post elsewhere (folds Item A)
+      *(2026-06-23)*
 
 **🔜 Next** (detail in [Roadmap](#roadmap))
-- [ ] **R4 — Thread-aware unread** (bug fix): per-thread watermark so thread @s clear
-      when I engage *that thread* — and don't vanish when I post elsewhere (folds Item A)
 - [ ] **R6 — Per-chat multi-message summary**: summarise across all unread in a chat,
       not just the latest (verbatim line still shows the latest)
 - [ ] **R5 — cc-mention down-ranking**: detect textual `cc @me`, tag + bias low (3rd
@@ -94,10 +95,22 @@ is a per-chat monotonic sequence, so this ordering is exact (more reliable than
 the minute-granularity `create_time`).
 
 **Thread/topic replies** come back with the sentinel `message_position = "-3"`
-(not a real sequence number). A naive `position > watermark` test reads `-3` as
-*older than everything* and wrongly drops it — so any **non-positive** position
-is treated as *uncomparable ⇒ unread*. (~half of @mentions are thread replies, so
-this matters a lot.)
+on the main timeline (not a real sequence number) but carry a real per-thread
+`thread_message_position`. The watermark is therefore built on **two axes** (R4,
+shipped 2026-06-23): `chat_id → max(message_position)` *and*
+`thread_id → max(thread_message_position)`, both from my own messages. A candidate
+is tested on **the axis it actually has a real position on**:
+
+- a message with a real `thread_message_position` is scoped to its **thread**
+  watermark (the chat watermark is ignored) — so my in-thread reply clears it, and
+  posting elsewhere in the chat does *not*;
+- everything else (non-thread, plus thread messages mirrored to main with a real
+  `message_position`) uses the **chat** watermark, as before;
+- a message with **no** real position on either axis (the "-3" sentinel *and* no
+  thread position — rare) is *uncomparable ⇒ unread*: it surfaces once, clearable
+  with `done`.
+
+(~half of @mentions are thread replies, so this matters a lot.)
 
 ### The reaction rule (also = "addressed")
 
@@ -131,10 +144,10 @@ once, clearable with `done`).
 **Known blind spot (irreducible):** a message I *read but never replied or reacted
 to* (e.g. a "sureee" closer, or a group @mention I read silently) will appear once.
 I clear it with `done`, or it ages out of the window. This is the unavoidable
-cost of Lark having no read API. *(Separately — and **not** irreducible — replying
-**in a thread** currently doesn't clear the mention: pure in-thread replies report
-`message_position = "-3"`, defeating the watermark on both sides. Fixable via a
-per-thread watermark; tracked as **R4**.)*
+cost of Lark having no read API. *(The thread-reply false positive/negative this
+note used to flag is **fixed** as of the per-thread watermark — R4, 2026-06-23.
+A narrow residual remains: a thread message with **no** real position on either
+axis surfaces once, clearable with `done`.)*
 
 ---
 
@@ -336,7 +349,7 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | `messages-search` time format | Numeric offset, no ms (`+00:00`); `.sssZ` → `99992402` |
 | Patch/edit a sent card | No message-patch method → re-render + resend |
 | Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+…) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, so fully reconstructable from `chat_id`+`message_position`) |
-| Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies (the watermark axis breaks); **`thread_message_position`** is a real per-thread sequence usable for a per-thread watermark (R4). Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both |
+| Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies, so they're watermarked on **`thread_message_position`** (a real per-thread sequence) via the per-thread watermark — **shipped, R4**. Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both — so a message with neither still surfaces once (residual) |
 
 ## Non-functional requirements
 
@@ -412,9 +425,17 @@ detail collapse by default and expand on demand.
   keep HIGH expanded, collapse MEDIUM/LOW. Assess against real card limits before
   building.
 
-### R4 — Thread-aware unread, both directions (bug fix, queued 2026-06-18)
+### R4 — Thread-aware unread, both directions (bug fix) ✅ shipped 2026-06-23
 
-Our watermark is per-**chat**, not per-**thread**, so thread @mentions misfire in
+**As built:** the watermark is now dual-axis (`chat_id → max(message_position)` +
+`thread_id → max(thread_message_position)`, both from my own messages), and
+`isUnread` tests each candidate on the axis it has a real position on — thread
+position if present (scoped to that thread, chat watermark ignored), else the chat
+watermark. Both misfires below are fixed; the residual is a thread message with no
+real position on either axis (surfaces once, clearable with `done`). Covered by the
+`isUnread … per-thread watermark (R4)` unit test.
+
+Our watermark was per-**chat**, not per-**thread**, so thread @mentions misfired in
 *both* directions:
 - **False positive:** replying *in a thread* doesn't clear the mention — pure
   in-thread replies report `message_position = "-3"`, so the reply-watermark can't

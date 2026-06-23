@@ -65,11 +65,17 @@ function normalize(msg, { isDM, selfOpenId }) {
   return {
     messageId: msg.message_id,
     chatId: msg.chat_id,
-    // Per-chat monotonic sequence — used for the unread (reply-watermark) test.
+    // Per-chat monotonic sequence — the MAIN-timeline axis of the watermark test.
     // Thread/topic replies come back as the sentinel "-3" (not a real position);
     // normalize keeps it as-is and isUnread() treats any non-positive value as
-    // "uncomparable ⇒ unread" rather than misreading it as already-read.
+    // "uncomparable on the main axis".
     position: parseInt(msg.message_position, 10) || 0,
+    // Thread axis (R4). A thread/topic message also carries a `thread_id` and a
+    // per-thread monotonic `thread_message_position`. A pure in-thread reply has
+    // a real thread position but `message_position = -3`, so isUnread() scopes its
+    // read-ness to the per-thread watermark instead of the per-chat one. 0 = absent.
+    threadId: msg.thread_id || null,
+    threadPosition: parseInt(msg.thread_message_position, 10) || 0,
     chatName: null, // resolved later, best-effort
     isDM,
     // @all broadcast (group message that didn't name me directly). Kept, but
@@ -88,17 +94,38 @@ function normalize(msg, { isDM, selfOpenId }) {
 }
 
 /**
- * Unread (reply-watermark) test: a candidate is unread only if it is newer than
- * the user's own latest message in that chat. No watermark for the chat (the
- * user never posted there in the lookback) ⇒ treat as unread. Lark has no real
- * read-state, so this is the proxy — see SPEC.md.
+ * Unread (reply-watermark) test. A message lives on exactly one timeline, and the
+ * user has "read" it only if they posted at/after it ON THAT timeline. `watermark`
+ * carries both axes: `{ chat: Map<chatId,pos>, thread: Map<threadId,threadPos> }`.
+ *
+ * - **Thread message with a real thread position** (the common case — pure
+ *   in-thread replies arrive with `message_position = -3`): scope read-ness to the
+ *   THREAD watermark, ignoring the chat watermark. This fixes R4 in both
+ *   directions — an in-thread reply now clears the mention, and posting elsewhere
+ *   in the same chat no longer clears a thread the user never engaged.
+ * - **Everything else** (non-thread messages, and thread messages mirrored to the
+ *   main timeline with a real `message_position`): the per-chat watermark, as before.
+ * - **Both positions sentinel** (rare): uncomparable on either axis ⇒ unread; it
+ *   surfaces once and is clearable with `done`.
+ *
+ * No watermark on the relevant axis (the user never posted there in the lookback)
+ * ⇒ treat as unread. Lark exposes no real read-state, so this is the proxy — see SPEC.md.
  */
 export function isUnread(item, watermark) {
-  const latestOwn = watermark.get(item.chatId) || 0;
-  // position <= 0 means no comparable position (e.g. the "-3" thread sentinel),
-  // and no watermark means I never posted in that chat — both ⇒ treat as unread.
-  if (item.position <= 0 || !latestOwn) return true;
-  return item.position > latestOwn;
+  // Thread axis: the message lives in a thread and carries a real per-thread
+  // position — compare only against my latest reply in THAT thread.
+  if (item.threadId && item.threadPosition > 0) {
+    const ownThread = watermark.thread.get(item.threadId) || 0;
+    if (!ownThread) return true; // never engaged this thread ⇒ unread
+    return item.threadPosition > ownThread;
+  }
+  // Main axis: non-thread messages + thread messages mirrored to main.
+  const ownChat = watermark.chat.get(item.chatId) || 0;
+  // position <= 0 means no comparable main position (the "-3" sentinel with no
+  // real thread position either), and no watermark means I never posted in that
+  // chat — both ⇒ treat as unread.
+  if (item.position <= 0 || !ownChat) return true;
+  return item.position > ownChat;
 }
 
 /**
@@ -119,20 +146,26 @@ export function dedupeByChat(items) {
 }
 
 /**
- * Build the reply watermark: chat_id -> highest message_position among the
- * user's OWN recent messages. A candidate is "unread" only if its position is
- * greater than its chat's watermark (i.e. the user has not posted after it).
- * Lark exposes no real read-state, so this is the proxy — see SPEC.md.
+ * Build the reply watermark from the user's OWN recent messages, on BOTH axes:
+ *   - `chat`:   chat_id   -> highest main-timeline `message_position`
+ *   - `thread`: thread_id -> highest `thread_message_position`
+ * isUnread() picks the axis a candidate actually lives on. A message I sent into a
+ * thread raises the thread watermark (its `message_position` is the "-3" sentinel,
+ * so it never raised the chat watermark — that was the R4 bug). Lark exposes no
+ * real read-state, so this is the proxy — see SPEC.md.
  */
 async function buildWatermark(self) {
   const start = new Date(Date.now() - config.watermarkLookbackDays * MS_PER_DAY).toISOString();
   const mine = await searchMessages({ sender: self.openId, start });
-  const wm = new Map();
+  const chat = new Map();
+  const thread = new Map();
   for (const m of mine) {
     const pos = parseInt(m.message_position, 10) || 0;
-    if (pos > (wm.get(m.chat_id) || 0)) wm.set(m.chat_id, pos);
+    if (pos > (chat.get(m.chat_id) || 0)) chat.set(m.chat_id, pos);
+    const tpos = parseInt(m.thread_message_position, 10) || 0;
+    if (m.thread_id && tpos > (thread.get(m.thread_id) || 0)) thread.set(m.thread_id, tpos);
   }
-  return wm;
+  return { chat, thread };
 }
 
 /**

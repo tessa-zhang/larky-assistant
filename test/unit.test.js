@@ -46,16 +46,40 @@ test('hasMeaningfulText ignores placeholder-only content', () => {
   assert.equal(hasMeaningfulText('see this [Image: img_1] please'), true);
 });
 
-test('isUnread is true only past the chat watermark', () => {
-  const watermark = new Map([['oc_a', 100]]);
+test('isUnread is true only past the chat watermark (main axis)', () => {
+  const watermark = { chat: new Map([['oc_a', 100]]), thread: new Map() };
   assert.equal(isUnread({ chatId: 'oc_a', position: 101 }, watermark), true);  // newer than my reply
   assert.equal(isUnread({ chatId: 'oc_a', position: 100 }, watermark), false); // my reply itself
   assert.equal(isUnread({ chatId: 'oc_a', position: 99 }, watermark), false);  // before my reply
   assert.equal(isUnread({ chatId: 'oc_b', position: 5 }, watermark), true);    // no reply in that chat
   assert.equal(isUnread({ chatId: 'oc_a', position: 0 }, watermark), true);    // unknown position
-  // Thread/topic replies arrive as the "-3" sentinel — must NOT be read as
-  // already-read just because a watermark exists for the chat (regression).
+  // Non-thread "-3" sentinel: no comparable main position ⇒ unread (regression).
   assert.equal(isUnread({ chatId: 'oc_a', position: -3 }, watermark), true);
+});
+
+test('isUnread scopes thread messages to the per-thread watermark (R4)', () => {
+  // I replied in thread omt_1 (up to thread_position 12) but never in omt_2.
+  // I also posted recently on oc_a's MAIN timeline (chat watermark 100).
+  const watermark = { chat: new Map([['oc_a', 100]]), thread: new Map([['omt_1', 12]]) };
+  const threadMsg = (threadPosition, threadId = 'omt_1') =>
+    ({ chatId: 'oc_a', position: -3, threadId, threadPosition }); // pure in-thread reply: main = -3
+
+  // Bug-fix #1 (false positive): an in-thread reply now clears the mention.
+  assert.equal(isUnread(threadMsg(10), watermark), false); // 10 <= my thread reply 12 ⇒ read
+  assert.equal(isUnread(threadMsg(12), watermark), false); // my reply itself ⇒ read
+  assert.equal(isUnread(threadMsg(13), watermark), true);  // posted after my reply ⇒ unread
+
+  // Bug-fix #2 (false negative): a thread I never engaged stays unread EVEN THOUGH
+  // I posted on oc_a's main timeline (chat watermark must be ignored here).
+  assert.equal(isUnread(threadMsg(7, 'omt_2'), watermark), true);
+
+  // Residual blind spot: both positions sentinel (no real thread position) ⇒
+  // falls through to the main axis as the "-3" sentinel ⇒ unread, surfaces once.
+  assert.equal(isUnread({ chatId: 'oc_a', position: -3, threadId: 'omt_1', threadPosition: 0 }, watermark), true);
+
+  // A thread message mirrored to main (real message_position, no thread position)
+  // still clears via the chat watermark — it's genuinely visible on main.
+  assert.equal(isUnread({ chatId: 'oc_a', position: 80, threadId: 'omt_1', threadPosition: 0 }, watermark), false);
 });
 
 test('mentionsUser detects a direct @me but not an @all broadcast', () => {
