@@ -34,23 +34,33 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       permanently unread (a replied-to first DM kept resurfacing). A real `0` now
       compares against the watermark like any position; only the `-3` sentinel and a
       truly absent value are uncomparable. *(2026-06-23)*
+- [x] **R6 — Multi-message / thread summary** *(2026-06-24)*: a digest row now summarises
+      the whole **unread bundle**, not just the latest message — **per thread** for group
+      @s (thread fetched via `threads-messages-list`), **per DM** for DMs. The grouping
+      unit shifts chat→thread for threaded @s (`groupRows` + `bundleKey`). Token cost is
+      kept ~flat per thread (it'd balloon at team scale) via a **salient slice** — thread
+      head + @mention neighbourhood + unread tail, capped to `THREAD_BUNDLE_MAX_MSGS` with
+      gaps elided and each line clipped to `BUNDLE_MSG_CHARS` — plus a fetch-on-demand gate
+      (a lone, long @-line skips the fetch). ≤15-word bundle summary that leads with the
+      ask; verbatim still shows the latest. @all stays single + downranked. Thread rows
+      carry a `🧵 <topic>` label so several threads in one chat are distinguishable.
 
-**🔜 Next** (detail in [Roadmap](#roadmap))
-- [ ] **R6 — Multi-message summary** (NEXT UP, sharpened 2026-06-23): summarise the
-      whole unread bundle so I can decide *without opening the chat* — per **thread**
-      for group @s, per **DM** for DMs; ≤15-word summary, verbatim still shows the latest
+**🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R3 → R2 launch**.
+- [ ] **R3 — Concise / expandable digest** (NEXT UP — next session): collapse **only the
+      LOW/FYI** section by default; HIGH + MEDIUM stay expanded. Render path confirmed —
+      `collapsible_panel` works on self-chat (spike 2026-06-24).
+- [ ] **R2 — Hosted bot** (committed; the launch step after R3 — Lark app **configured +
+      approved** on Tessa's side, 2026-06-24): frictionless, installable + runnable *without
+      an IDE*, ideally entirely inside Lark. **Pre-launch gate:** add the R6 thread-summary
+      **caching** (token guard) before exposing to teammates.
 - [ ] **R5 — cc-mention down-ranking**: detect textual `cc @me`, tag + bias low (3rd
       lane alongside @all)
-- [ ] **R3 — Concise / expandable digest** (should-have): collapse the digest so a
-      14-item run stays scannable instead of a wall of text
 - [ ] **R7 — Interactive per-item done/snooze**: per-row buttons; `done` drops a ✅
       reaction so it survives without a global list (needs callback spike + R2)
 - [ ] **R8 — Dynamic lookback** (to design): start-of-week moving window; track every
       unaddressed @ so nothing ages out silently
 - [ ] **R1 — Priority groups** (should-have, opt-in): surface/consider non-@
       messages from groups I designate as relevant
-- [ ] **R2 — Hosted bot** (committed direction): frictionless, installable + runnable
-      *without an IDE*, ideally entirely inside Lark
 
 ---
 
@@ -355,6 +365,7 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | `messages-search` time format | Numeric offset, no ms (`+00:00`); `.sssZ` → `99992402` |
 | `message_position` indexing | **0-indexed** — a chat's first message is `"0"`, a real comparable value. Only the `-3` thread sentinel and a missing/garbage value are uncomparable. Don't conflate a real `0` with "absent" (use `parsePosition` → integer-or-`null`, not `parseInt() \|\| 0`), or a replied-to first message sticks forever |
 | Patch/edit a sent card | No message-patch method → re-render + resend |
+| Fetch a **full thread's** messages | `im +threads-messages-list --thread <omt_/om_> --sort asc\|desc` returns the same enriched shape as search (decoded `content`, real `thread_message_position`); `+chat-messages-list` does the same for a p2p/chat. **Gotcha:** `--help` advertises `page_size` 1–500, but the API really caps it at **50** — request more and it **silently returns 0 messages** (no error), so a naive whole-thread fetch fails open to nothing. Clamp to 50. (2026-06-24) |
 | Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+…) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, so fully reconstructable from `chat_id`+`message_position`) |
 | Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies, so they're watermarked on **`thread_message_position`** (a real per-thread sequence) via the per-thread watermark — **shipped, R4**. Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both — so a message with neither still surfaces once (residual) |
 
@@ -404,9 +415,19 @@ user designate **priority groups**; messages there get evaluated too.
 **install and run it without an IDE**, ideally entirely within Lark (DM the bot
 `digest`). **Prioritise frictionless setup above everything else.**
 
+**Status (2026-06-24):** the Lark app is **configured + approved** on Tessa's side
+(bot capability + scopes/publish handled there). Remaining crux: per-user auth
+onboarding (below), and the pre-launch token guard.
+
+**Pre-launch gate — token cost:** R6's thread bundling makes each row bigger, and a
+stateless run re-summarises *everything* each time; before exposing the bot to teammates,
+add the per-thread **summary cache** (keyed by `thread_id` + newest `thread_message_position`
++ watermark — see R6) so repeat runs on unchanged threads cost ~zero. At multi-user scale
+this is the dominant cost lever, so it gates launch.
+
 - **Implies:** bot capability activated (✅ confirmed 2026-06-17 — `232025` is
-  gone), then the app must **apply the scopes + publish a version**. Verified
-  missing scopes as of 2026-06-17:
+  gone), then the app must **apply the scopes + publish a version** (✅ done on Tessa's
+  side, 2026-06-24). Scopes that were verified missing as of 2026-06-17:
   - *Send as bot:* `im:message:send`, `im:message`, `im:message:send_as_bot`
   - *Chat names + enumeration (labels + R1):* `im:chat:readonly`, `im:chat`,
     `im:chat.group_info:readonly`, `im:chat:read`
@@ -423,14 +444,17 @@ A busy digest is a wall of text: each row is header + AI summary + verbatim exce
 + a Jump button, so ~14 items overflow the card and stop being scannable. Make
 detail collapse by default and expand on demand.
 
-- **Lark card capability to explore:** the v2 card schema has a `collapsible_panel`
-  component (and column sets) — the cleanest fit if supported on the delivery
-  surface. Fallbacks if not: hide the verbatim excerpt behind "show more" (summary
-  stays), or render dense one-line-per-chat rows.
-- **Open question / tension:** density vs. the core "triage *without opening the
-  chat*" goal, which depends on the verbatim excerpt being visible. Likely answer:
-  keep HIGH expanded, collapse MEDIUM/LOW. Assess against real card limits before
-  building.
+- **Feasibility — confirmed (spike 2026-06-24):** the v2 card `collapsible_panel`
+  component **renders on our delivery surface** (self-chat via `SEND_AS=user`) — a
+  test card came through correctly. Today's card is the **v1 schema** (`div`/`hr`/
+  `note`/`action`), so R3 entails migrating `buildCard.js` to the v2 schema, then
+  wrapping the collapsed section. Fallbacks (no longer needed): show-more on the
+  verbatim, or dense one-line rows.
+- **Decision (refined by Tessa, 2026-06-24):** collapse **only the LOW / FYI**
+  section by default; **HIGH and MEDIUM stay expanded** — top-prio items are usually
+  short and get actioned quickly, so collapsing them costs more than it saves. (Was:
+  "keep HIGH expanded, collapse MEDIUM/LOW.") This also keeps the core "triage
+  *without opening the chat*" goal intact for the items that matter most.
 
 ### R4 — Thread-aware unread, both directions (bug fix) ✅ shipped 2026-06-23
 
@@ -502,13 +526,28 @@ posted — the position-0 fix makes "from 0" correct).
 - Grouping unit shifts from per-**chat** to per-**thread** for threaded mentions
   (extends R4's thread axis — likely a `dedupeByThread` alongside `dedupeByChat`).
 
-**Open / to settle when we start (logged 2026-06-23):**
-- Thread bundle = the **unread** portion only, or the **whole thread** for context?
-  (Tessa leans whole-thread for context; the ≤15-word cap + fetch cost argue for an
-  unread-led summary with light prior context.)
-- **Feasibility:** can `lark-cli` fetch a full thread's messages (vs only the
-  `--is-at-me` search results)? Verify the fetch path before committing to whole-thread.
-- **@all broadcasts:** keep as single-message + downranked (not bundled) — confirm.
+**Settled as built (2026-06-24):**
+- Thread bundle scope — **whole-thread context** (Tessa's pick), but the cost is tamed
+  rather than paid in full: we fetch the thread, then send Claude only a **salient slice**
+  (head + @mention neighbourhood + unread tail; cap + per-msg clip + elided gaps) so token
+  spend stays ~flat per thread regardless of length — the key concern once colleagues use
+  it. A fetch-on-demand gate skips the call for a lone, self-contained @-line.
+- **Token guard before multi-user — deferred, tracked as an R2 pre-launch gate:** cache the
+  per-thread **summary** (the expensive output, not the slice), keyed by `thread_id` + newest
+  `thread_message_position` + my watermark. On a later run, if those are unchanged the thread
+  is reused with **zero** Anthropic tokens (we reuse the stored answer, not regenerate). The
+  Lark fetch is already token-free — it's re-summarising *unchanged* threads on every
+  stateless run that compounds across users × runs. Not worth it single-user; add it **before
+  exposing the bot** (R2). NB: the summary is per-user (framed around what *I* must do + my
+  watermark), so the cache is per-user; only the raw thread fetch could be shared across users.
+- **Feasibility — RESOLVED (spike 2026-06-24):** yes. `lark-cli im +threads-messages-list`
+  lists a full thread's messages (accepts `om_`/`omt_`, resolves to `thread_id`,
+  paginates); `+chat-messages-list` lists a full p2p/chat history; `+messages-mget`
+  (≤50 ids) "expands thread replies". So whole-thread context is fetchable — the only
+  open call is how *much* context to pull (see the bullet above), which has a
+  privacy/cost dimension: thread context includes colleagues' messages that didn't @
+  me, which today never leave Lark to the Anthropic API.
+- **@all broadcasts:** kept as single-message + downranked (not bundled) — confirmed as built.
 
 ### R7 — Interactive per-item done/snooze (should-have, added 2026-06-18)
 

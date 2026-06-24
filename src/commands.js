@@ -72,6 +72,9 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
   const card = buildDigestCard({ items, since: sinceDate, generatedAt: runAt, footerHint });
   await deliver(delivery, card, 'interactive');
 
+  // The bundle (DM run / thread slice) was only needed to classify; drop it so the
+  // snapshot done/snooze re-renders from stays lean (it keeps bundleType/threadTopic).
+  for (const it of items) delete it.bundle;
   state.lastRunAt = runAt.toISOString();
   state.lastDigest = { generatedAt: runAt.toISOString(), since, items };
   await store.save(state);

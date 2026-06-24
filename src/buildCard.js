@@ -29,7 +29,11 @@ function itemLabel(item) {
   if (item.isDM) return `${item.chatName || item.senderName || 'Direct message'} · DM`;
   // Group: prefer the resolved chat name; until bot capability is enabled it's
   // null, so fall back to whoever sent the latest unread message.
-  return item.chatName || (item.senderName ? `${item.senderName} · group` : 'group');
+  const base = item.chatName || (item.senderName ? `${item.senderName} · group` : 'group');
+  // A chat can now yield several thread rows (R6) — mark them and, where we have it,
+  // append a short topic from the thread head so they're distinguishable at a glance.
+  if (item.bundleType === 'thread') return item.threadTopic ? `${base} · 🧵 ${item.threadTopic}` : `${base} · 🧵`;
+  return base;
 }
 
 function itemBlock(item, now) {

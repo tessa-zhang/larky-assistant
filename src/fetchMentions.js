@@ -1,4 +1,4 @@
-import { searchMessages, getChatName, getReactedMessageIds } from './lark.js';
+import { searchMessages, getChatName, getReactedMessageIds, listThreadMessages } from './lark.js';
 import { config, isExcludedChatName } from './config.js';
 import { hiddenMessageIds } from './state.js';
 import { MS_PER_DAY } from './time.js';
@@ -144,20 +144,177 @@ export function isUnread(item, watermark) {
 }
 
 /**
- * Collapse to ONE row per chat — the latest unread message — mirroring Lark's
- * "@ Mentions" tab (one entry per conversation). The representative carries
- * `chatUnreadCount` so the card can show "+N more in chat".
+ * The grouping unit for a digest row (R6). Today a chat collapsed to one row; now
+ * the unit depends on the surface, because that's how the work actually clusters:
+ *   - **DM**            → one row per conversation (`dm`); bundle = its unread run.
+ *   - **@all broadcast** → one row per chat (`single`); never bundled (it's not a
+ *                          personal, multi-message ask — see SPEC). DMs aside, this
+ *                          is checked before threads so a thread-rooted @all stays single.
+ *   - **threaded @me**   → one row per THREAD (`thread`); bundle = a salient slice of
+ *                          the thread. In groups, topics live in separate threads, so
+ *                          two threads in one chat are usually unrelated.
+ *   - **plain group @me** → one row per chat's main timeline (`single`), as before.
  */
-export function dedupeByChat(items) {
-  const byChat = new Map();
+export function bundleKey(item) {
+  if (item.isDM) return { key: `dm:${item.chatId}`, type: 'dm' };
+  if (item.isBroadcast) return { key: `chat:${item.chatId}`, type: 'single' };
+  if (item.threadId) return { key: `thread:${item.threadId}`, type: 'thread' };
+  return { key: `chat:${item.chatId}`, type: 'single' };
+}
+
+/** Latest of a set — newest create_time, tie-broken by higher position. */
+function pickLatest(members) {
+  return members.reduce((rep, it) => {
+    const newer = (it.createTime?.getTime() || 0) - (rep.createTime?.getTime() || 0);
+    return newer > 0 || (newer === 0 && (it.position ?? -1) > (rep.position ?? -1)) ? it : rep;
+  });
+}
+
+/**
+ * Group the filtered unread items into rows (replaces the old per-chat collapse).
+ * Each row carries the representative (the latest message — it supplies the card's
+ * verbatim line + jump link), the `bundleType`, the `members` (all unread items in
+ * that group — used to build the bundle, then dropped), and `chatUnreadCount` (the
+ * "+N more" count; refined to the thread's unread total once a thread is fetched).
+ */
+export function groupRows(items) {
+  const byKey = new Map();
   for (const it of items) {
-    const cur = byChat.get(it.chatId);
-    if (!cur) { byChat.set(it.chatId, { rep: it, count: 1 }); continue; }
-    cur.count++;
-    const newer = (it.createTime?.getTime() || 0) - (cur.rep.createTime?.getTime() || 0);
-    if (newer > 0 || (newer === 0 && (it.position ?? -1) > (cur.rep.position ?? -1))) cur.rep = it;
+    const { key, type } = bundleKey(it);
+    let g = byKey.get(key);
+    if (!g) { g = { type, members: [] }; byKey.set(key, g); }
+    g.members.push(it);
   }
-  return [...byChat.values()].map(({ rep, count }) => ({ ...rep, chatUnreadCount: count }));
+  return [...byKey.values()].map(({ type, members }) => ({
+    ...pickLatest(members),
+    bundleType: type,
+    members,
+    chatUnreadCount: members.length,
+  }));
+}
+
+/** Truncate a single message's text for inclusion in a bundle. */
+function clip(text, max) {
+  const s = (text || '').replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
+}
+
+/**
+ * A DM's unread-run bundle: the unread incoming messages (we already fetched the
+ * whole p2p conversation, so no extra call), oldest→newest, recency-capped. All are
+ * "from them" — by definition the run is everything after my last sent message.
+ */
+export function dmBundle(members, { maxMsgs, msgChars }) {
+  return [...members]
+    .sort((a, b) => (a.createTime?.getTime() || 0) - (b.createTime?.getTime() || 0) || (a.position ?? 0) - (b.position ?? 0))
+    .slice(-maxMsgs)
+    .map((m) => ({ sender: m.senderName, text: clip(m.text, msgChars), you: false }));
+}
+
+/**
+ * Pure: pick the SALIENT SLICE of a thread to summarise, so token cost stays ~flat
+ * regardless of thread length (the ballooning fix). Keep the union of:
+ *   - **head** — first `headMsgs` messages (what the thread is about),
+ *   - **mention neighbourhood** — ±`around` messages around each of my @-lines,
+ *   - **unread tail** — messages past my per-thread watermark (what's new since I looked).
+ * Then cap to `maxMsgs` keeping the head + the most-recent rest (recency-biased), and
+ * mark dropped gaps with an `{ elided: n }` sentinel so the summary knows it's not
+ * contiguous. `messages` are normalized thread messages; returns slice entries in
+ * chronological order (message objects interleaved with elision sentinels).
+ */
+export function buildThreadSlice(messages, { mentionIds, threadWatermark, headMsgs, around, maxMsgs }) {
+  const sorted = messages
+    .filter((m) => !m.deleted && hasMeaningfulText(m.text))
+    .sort((a, b) =>
+      (a.threadPosition ?? a.position ?? 0) - (b.threadPosition ?? b.position ?? 0) ||
+      (a.createTime?.getTime() || 0) - (b.createTime?.getTime() || 0));
+  if (sorted.length === 0) return [];
+
+  const keep = new Set();
+  for (let i = 0; i < Math.min(headMsgs, sorted.length); i++) keep.add(i);
+  sorted.forEach((m, i) => {
+    // Unread tail: no watermark on this thread ⇒ everything is "new"; the cap bounds it.
+    if (threadWatermark == null || (m.threadPosition != null && m.threadPosition > threadWatermark)) keep.add(i);
+    if (mentionIds.has(m.messageId)) {
+      for (let j = Math.max(0, i - around); j <= Math.min(sorted.length - 1, i + around); j++) keep.add(j);
+    }
+  });
+
+  let idxs = [...keep].sort((a, b) => a - b);
+  if (idxs.length > maxMsgs) {
+    const head = idxs.filter((i) => i < headMsgs);
+    const rest = idxs.filter((i) => i >= headMsgs).slice(-(maxMsgs - head.length));
+    idxs = [...head, ...rest].sort((a, b) => a - b);
+  }
+
+  const out = [];
+  let prev = -1;
+  for (const i of idxs) {
+    if (prev !== -1 && i > prev + 1) out.push({ elided: i - prev - 1 });
+    out.push(sorted[i]);
+    prev = i;
+  }
+  return out;
+}
+
+/**
+ * Build a thread row's bundle: gate → fetch → slice → shape for the classifier.
+ * Mutates the row's `chatUnreadCount` to the thread's unread total and sets a short
+ * `threadTopic` (from the head) so two threads in one chat are distinguishable on the
+ * card. Returns the bundle array, or `null` to fall back to a single-message summary
+ * (gated out, fetch failed/empty, or nothing salient).
+ */
+async function buildThreadBundle(row, watermark, self) {
+  // Fetch-on-demand gate: a lone, self-contained @-line needs no thread context.
+  const lone = row.members.length < 2;
+  if (lone && config.threadGateChars > 0 && (row.text || '').length >= config.threadGateChars) return null;
+
+  const raw = await listThreadMessages(row.threadId, { sort: 'desc', pageSize: config.threadFetchPageSize });
+  if (raw.length === 0) return null;
+  const msgs = raw.map((m) => normalize(m, { isDM: false, selfOpenId: self.openId }));
+
+  const threadWatermark = watermark.thread.get(row.threadId);
+  const unreadCount = msgs.filter(
+    (m) => threadWatermark == null || (m.threadPosition != null && m.threadPosition > threadWatermark),
+  ).length;
+  if (unreadCount > 0) row.chatUnreadCount = unreadCount;
+
+  const slice = buildThreadSlice(msgs, {
+    mentionIds: new Set(row.members.map((m) => m.messageId)),
+    threadWatermark,
+    headMsgs: config.threadHeadMsgs,
+    around: config.threadAroundMention,
+    maxMsgs: config.threadBundleMaxMsgs,
+  });
+  if (slice.length <= 1) return null; // nothing more than the single message we already have
+
+  const head = slice.find((e) => !e.elided);
+  if (head) row.threadTopic = clip(head.text, 32);
+
+  return slice.map((e) =>
+    e.elided
+      ? { sender: '', text: `…(${e.elided} earlier message${e.elided === 1 ? '' : 's'} omitted)…`, you: false }
+      : { sender: e.senderName, text: clip(e.text, config.bundleMsgChars), you: e.senderId === self.openId });
+}
+
+/**
+ * Attach a `bundle` to each row for multi-message summarisation (R6). DMs bundle
+ * their already-fetched unread run; threaded group @s fetch a salient thread slice
+ * (concurrently, gated); plain group @s and @all broadcasts stay single-message
+ * (`bundle` stays undefined ⇒ the classifier summarises the one rep message). The
+ * heavy `members` array is dropped afterwards so it never reaches state/card.
+ */
+async function attachBundles(rows, watermark, self) {
+  await Promise.all(rows.map(async (row) => {
+    if (row.bundleType === 'dm' && row.members.length > 1) {
+      row.bundle = dmBundle(row.members, { maxMsgs: config.dmBundleMaxMsgs, msgChars: config.bundleMsgChars });
+    } else if (row.bundleType === 'thread') {
+      const bundle = await buildThreadBundle(row, watermark, self);
+      if (bundle) row.bundle = bundle;
+    }
+    delete row.members;
+  }));
+  return rows;
 }
 
 /**
@@ -263,17 +420,22 @@ export async function fetchSince(startISO, self, state) {
     return true;
   });
 
-  // One row per chat (latest unread) — matches Lark's "@ Mentions" tab.
-  items = dedupeByChat(items);
+  // Group into rows: one per DM, one per thread (threaded @s), one per chat
+  // otherwise (R6 — supersedes the flat per-chat collapse).
+  let rows = groupRows(items);
 
   // Newest first; the digest re-sorts by urgency after classification.
-  items.sort((a, b) => (b.createTime?.getTime() || 0) - (a.createTime?.getTime() || 0));
+  rows.sort((a, b) => (b.createTime?.getTime() || 0) - (a.createTime?.getTime() || 0));
 
-  // Rate-limit guard: cap and report (caps chats now, post-dedup).
-  if (items.length > config.maxMessages) {
-    skipped.capped = items.length - config.maxMessages;
-    items = items.slice(0, config.maxMessages);
+  // Rate-limit guard: cap and report. Done BEFORE bundling so we never spend a
+  // thread fetch on a row we're about to drop.
+  if (rows.length > config.maxMessages) {
+    skipped.capped = rows.length - config.maxMessages;
+    rows = rows.slice(0, config.maxMessages);
   }
 
-  return { items, skipped };
+  // Attach the multi-message bundle to each surviving row (thread fetches run here).
+  await attachBundles(rows, watermark, self);
+
+  return { items: rows, skipped };
 }

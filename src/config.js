@@ -44,6 +44,39 @@ export const config = {
   // item (≈2 lines on a wide card). The exact wording, so you can triage without
   // opening the chat (which would mark it read).
   rawPreviewChars: Number(process.env.RAW_PREVIEW_CHARS || 160),
+
+  // --- R6: multi-message / thread-summary bundling -------------------------
+  // Each digest row can summarise a *bundle* of unread messages, not just the
+  // latest one: a DM's unread run, or a group thread's discussion. To keep token
+  // spend ~flat per row regardless of how long a thread is (it balloons fast once
+  // many colleagues use this), we fetch the thread but only send Claude a SALIENT
+  // SLICE — thread head + the neighbourhood around each @mention + the unread tail
+  // — capped and per-message-truncated. See fetchMentions.buildThreadSlice + SPEC R6.
+  //
+  // Max messages from a single bundle sent to Claude (recency-biased; older middle
+  // is elided with a marker). The ballooning fix: a 6-msg thread and a 300-msg
+  // thread both cost ~this many messages.
+  threadBundleMaxMsgs: Number(process.env.THREAD_BUNDLE_MAX_MSGS || 8),
+  // Messages from the START of a thread always kept (what the thread is about).
+  threadHeadMsgs: Number(process.env.THREAD_HEAD_MSGS || 2),
+  // Messages kept on each side of an @mention (the ask + local context).
+  threadAroundMention: Number(process.env.THREAD_AROUND_MENTION || 2),
+  // Max messages in a DM's unread-run bundle (DMs are fetched already — no extra call).
+  dmBundleMaxMsgs: Number(process.env.DM_BUNDLE_MAX_MSGS || 10),
+  // Per-message char cap INSIDE a bundle (chat lines are short; one wall-of-text
+  // message shouldn't dominate the slice). Single-message items keep the larger 2000.
+  bundleMsgChars: Number(process.env.BUNDLE_MSG_CHARS || 300),
+  // Page size for the thread fetch (one `desc` call → newest N). Threads ≤ this come
+  // back whole; longer ones return the recent tail (which holds the @mention + unread
+  // run) — the head may be missing then, which the slice tolerates. NB: lark-cli's
+  // --help claims a 500 max, but the underlying Lark thread API really caps page_size
+  // at 50 — asking for more silently returns ZERO messages (verified 2026-06-24). The
+  // wrapper clamps to 50; don't raise this past it or thread bundling fails open.
+  threadFetchPageSize: Number(process.env.THREAD_FETCH_PAGE_SIZE || 50),
+  // Fetch-on-demand gate: skip the thread fetch when the @-line is already
+  // self-contained — a single @mention whose text is at least this long. Threads
+  // with multiple @-lines always fetch (a multi-message ask). 0 disables the gate.
+  threadGateChars: Number(process.env.THREAD_GATE_CHARS || 140),
 };
 
 /**

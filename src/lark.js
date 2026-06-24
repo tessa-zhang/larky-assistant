@@ -89,6 +89,37 @@ export async function searchMessages(opts = {}) {
 }
 
 /**
+ * List the messages of a single thread (R6 — thread-summary context). lark-cli's
+ * `+threads-messages-list` returns the SAME enriched message shape as
+ * messages-search (content already decoded to plain text, real
+ * `thread_message_position`, `sender`, `mentions`), so callers can reuse the same
+ * normalize path. One bounded call: `sort=desc` returns the newest `pageSize`
+ * messages (the @mention + unread tail live there); a thread shorter than `pageSize`
+ * comes back whole. Reactions enrichment is skipped (`--no-reactions`) — we only
+ * need text for summarisation, and it saves a request per message.
+ *
+ * `thread` accepts an `omt_`/`om_` id (lark-cli resolves a message id to its thread).
+ * Returns the raw message array; [] on any error (fail open — a missing thread
+ * bundle just degrades that row to a single-message summary).
+ */
+const THREAD_PAGE_MAX = 50; // Lark's real cap for this endpoint; >50 silently returns 0.
+export async function listThreadMessages(thread, { sort = 'desc', pageSize = THREAD_PAGE_MAX } = {}) {
+  if (!thread) return [];
+  // Clamp hard: lark-cli's --help advertises 500, but page_size > 50 comes back EMPTY
+  // (not an error), which would make every thread bundle silently fail open. See SPEC.
+  const size = Math.min(Math.max(1, pageSize | 0), THREAD_PAGE_MAX);
+  try {
+    const res = await runRaw([
+      'im', '+threads-messages-list', '--as', 'user', '--json', '--no-reactions',
+      '--thread', thread, '--sort', sort, '--page-size', String(size),
+    ]);
+    return res.data?.messages || res.messages || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Send a message. `content` is a string for text, or an object (Lark card) for
  * interactive. Returns the new message_id.
  */

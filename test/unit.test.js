@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { relativeTime, formatDateTime, formatDate, MS_PER_HOUR } from '../src/time.js';
 import { isExcludedChatName, config } from '../src/config.js';
-import { hasMeaningfulText, isUnread, dedupeByChat, mentionsUser, jumpLink, parsePosition } from '../src/fetchMentions.js';
+import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, jumpLink, parsePosition } from '../src/fetchMentions.js';
 import { reactedIdsFromDetails } from '../src/lark.js';
 import { extractJson } from '../src/classify.js';
 import { buildDigestCard, previewText } from '../src/buildCard.js';
@@ -146,20 +146,68 @@ test('jumpLink passes through working chat links, rebuilds broken thread links',
   );
 });
 
-test('dedupeByChat keeps the latest message per chat and counts the rest', () => {
+test('bundleKey routes by surface: DM, @all (never a thread), thread, plain group', () => {
+  assert.deepEqual(bundleKey({ isDM: true, chatId: 'oc_d' }), { key: 'dm:oc_d', type: 'dm' });
+  // an @all that happens to sit in a thread is still single — broadcast wins over thread.
+  assert.deepEqual(bundleKey({ isDM: false, isBroadcast: true, threadId: 'omt_x', chatId: 'oc_b' }), { key: 'chat:oc_b', type: 'single' });
+  assert.deepEqual(bundleKey({ isDM: false, isBroadcast: false, threadId: 'omt_y', chatId: 'oc_c' }), { key: 'thread:omt_y', type: 'thread' });
+  assert.deepEqual(bundleKey({ isDM: false, isBroadcast: false, threadId: null, chatId: 'oc_e' }), { key: 'chat:oc_e', type: 'single' });
+});
+
+test('groupRows: one row per DM / per thread / per chat-main, latest is rep, count carried', () => {
   const t = (h) => new Date(`2026-06-16T${h}:00:00Z`);
   const items = [
-    { chatId: 'oc_a', messageId: 'm1', position: 10, createTime: t('09') },
-    { chatId: 'oc_a', messageId: 'm2', position: 11, createTime: t('11') }, // latest in oc_a
-    { chatId: 'oc_a', messageId: 'm3', position: 9, createTime: t('08') },
-    { chatId: 'oc_b', messageId: 'm4', position: 5, createTime: t('10') },
+    { isDM: true, chatId: 'oc_dm', messageId: 'd1', position: 1, createTime: t('09') },
+    { isDM: true, chatId: 'oc_dm', messageId: 'd2', position: 2, createTime: t('10') }, // latest DM
+    { isDM: false, threadId: 'omt_1', chatId: 'oc_g', messageId: 't1', position: null, createTime: t('08') },
+    { isDM: false, threadId: 'omt_1', chatId: 'oc_g', messageId: 't2', position: null, createTime: t('11') }, // latest in thread 1
+    { isDM: false, threadId: 'omt_2', chatId: 'oc_g', messageId: 't3', position: null, createTime: t('07') }, // separate thread, same chat
+    { isDM: false, threadId: null, chatId: 'oc_g', messageId: 'g1', position: 9, createTime: t('06') }, // plain main-timeline @
+    { isDM: false, isBroadcast: true, chatId: 'oc_ann', messageId: 'b1', position: 3, createTime: t('05') },
   ];
-  const out = dedupeByChat(items).sort((a, b) => a.chatId.localeCompare(b.chatId));
-  assert.equal(out.length, 2);
-  assert.equal(out[0].messageId, 'm2');       // newest of oc_a wins
-  assert.equal(out[0].chatUnreadCount, 3);     // three unread in oc_a
-  assert.equal(out[1].messageId, 'm4');
-  assert.equal(out[1].chatUnreadCount, 1);
+  const byId = new Map(groupRows(items).map((r) => [r.messageId, r]));
+  assert.equal(byId.size, 5); // dm, thread1, thread2, chat-main, broadcast — two threads in oc_g do NOT merge
+  assert.equal(byId.get('d2').bundleType, 'dm');
+  assert.equal(byId.get('d2').chatUnreadCount, 2);     // d1+d2
+  assert.equal(byId.get('t2').bundleType, 'thread');
+  assert.equal(byId.get('t2').chatUnreadCount, 2);     // t1+t2 in thread 1
+  assert.equal(byId.get('t3').bundleType, 'thread');   // thread 2 is its own row
+  assert.equal(byId.get('g1').bundleType, 'single');   // plain main-timeline @
+  assert.equal(byId.get('b1').bundleType, 'single');   // @all never bundled
+});
+
+test('dmBundle takes the unread run oldest→newest, recency-caps, clips, marks not-me', () => {
+  const t = (h) => new Date(`2026-06-16T${h}:00:00Z`);
+  const members = [
+    { senderName: 'Bob', text: 'third',  createTime: t('11'), position: 3 },
+    { senderName: 'Bob', text: 'first',  createTime: t('09'), position: 1 },
+    { senderName: 'Bob', text: 'second', createTime: t('10'), position: 2 },
+  ];
+  const out = dmBundle(members, { maxMsgs: 2, msgChars: 300 });
+  assert.deepEqual(out.map((m) => m.text), ['second', 'third']); // sorted, last 2 kept
+  assert.ok(out.every((m) => m.you === false && m.sender === 'Bob'));
+  // clip collapses whitespace and truncates with an ellipsis
+  const clipped = dmBundle([{ senderName: 'X', text: 'a   b ' + 'z'.repeat(40), createTime: t('09'), position: 1 }], { maxMsgs: 5, msgChars: 6 });
+  assert.equal(clipped[0].text, 'a b z…');
+});
+
+test('buildThreadSlice keeps head + mention window + unread tail in order', () => {
+  // positions 0..5, all meaningful; @mention on position 4, my thread watermark at 4.
+  const msgs = Array.from({ length: 6 }, (_, i) => ({ messageId: `m${i}`, threadPosition: i, text: `msg ${i}`, deleted: false }));
+  const slice = buildThreadSlice(msgs, { mentionIds: new Set(['m4']), threadWatermark: 4, headMsgs: 2, around: 1, maxMsgs: 8 });
+  const kept = slice.filter((e) => !e.elided).map((e) => e.threadPosition);
+  assert.deepEqual(kept, [0, 1, 3, 4, 5]); // head 0,1 + window 3,4,5 (5 is also unread tail); 2 dropped
+  assert.equal(slice.filter((e) => e.elided).length, 1); // one gap (position 2)
+  assert.equal(slice.find((e) => e.elided).elided, 1);
+});
+
+test('buildThreadSlice caps recency-biased, keeping the head and eliding the middle', () => {
+  const msgs = Array.from({ length: 10 }, (_, i) => ({ messageId: `m${i}`, threadPosition: i, text: `msg ${i}`, deleted: false }));
+  // no watermark ⇒ every message is "unread"; cap must still bound the slice.
+  const slice = buildThreadSlice(msgs, { mentionIds: new Set(), threadWatermark: null, headMsgs: 2, around: 2, maxMsgs: 4 });
+  const kept = slice.filter((e) => !e.elided).map((e) => e.threadPosition);
+  assert.deepEqual(kept, [0, 1, 8, 9]); // head 0,1 + most-recent 8,9
+  assert.equal(slice.find((e) => e.elided).elided, 6); // positions 2..7 elided
 });
 
 test('previewText strips markup/placeholders, collapses whitespace, truncates', () => {
@@ -216,4 +264,14 @@ test('buildDigestCard groups by urgency and caps the LOW bucket', () => {
   assert.ok(text.includes('Alice'));          // group sender prefixed on the excerpt
   assert.ok(text.includes('📣 @all'));         // broadcast tag rendered on the @all item
   assert.ok(text.includes('hint'));           // footer
+});
+
+test('buildDigestCard marks thread rows with a 🧵 and the thread topic', () => {
+  const items = [
+    { n: 1, urgency: 'medium', category: 'question', summary: 'weigh in on rollout', isDM: false, bundleType: 'thread', threadTopic: 'staged rollout plan', chatName: 'eng', senderName: 'Dana', text: 'thoughts?', chatUnreadCount: 4, link: 'https://x', createTime: NOW },
+  ];
+  const text = JSON.stringify(buildDigestCard({ items, since: NOW, generatedAt: NOW }).elements);
+  assert.ok(text.includes('🧵'));                 // thread marker
+  assert.ok(text.includes('staged rollout plan')); // topic disambiguates threads in the same chat
+  assert.ok(text.includes('+3 more'));            // chatUnreadCount 4 → +3 more
 });

@@ -2,10 +2,15 @@ import Anthropic from '@anthropic-ai/sdk';
 import { config } from './config.js';
 
 const SYSTEM_PROMPT = `You are a triage assistant for a product manager at a travel tech company (Traveloka).
-You will receive a list of Lark messages that @mentioned the user or were sent as DMs.
-Your job is to classify each message by urgency and category.
+You will receive a list of items. Each item is something unread that needs triage: an @mention, a DM, or a group thread the user is involved in. Classify each by urgency and category, and summarise what it needs from the user.
 
 Return ONLY a valid JSON array. No preamble, no markdown, no explanation.
+
+Each item has EITHER:
+- "text": a single message, OR
+- "messages": a chronological bundle to read as ONE conversation — a DM's unread run ("kind":"dm") or a group thread ("kind":"thread"). Entries are { "from": who, "text": ... }; "from":"me" is the user's own message. A "(N earlier messages omitted)" entry marks a gap — do not assume the bundle is complete.
+
+When "messages" is present, summarise the WHOLE bundle, not just the last line — the actionable ask often spans several messages or sits earlier in a thread. For a thread, focus on what the user is being asked to do given the discussion.
 
 Urgency:
 - "high": action required today — incidents, outages, blocking issues, explicit sign-off requests, anything with urgent/ASAP/blocking/down/broken
@@ -21,15 +26,16 @@ Category:
 - "question": user is being asked something
 - "fyi": informational only
 
-Summary: One sentence, max 15 words, plain English. Focus on what the sender needs from the user.
+Summary: max 15 words, plain English, even for a multi-message bundle. LEAD WITH THE ASK (what the user must do / decide), don't enumerate the messages. E.g. a 5-message thread about a PR → "Review the auth-flow PR before tomorrow's release", not a recap of all 5.
 
 Input format:
 [
   { "message_id": "...", "sender": "...", "chat_name": "...", "is_broadcast": false, "text": "..." },
+  { "message_id": "...", "sender": "...", "chat_name": "...", "is_broadcast": false, "kind": "thread", "messages": [ { "from": "...", "text": "..." }, ... ] },
   ...
 ]
 
-Output format:
+Output format (one object per item, keyed by its message_id):
 [
   { "message_id": "...", "urgency": "high|medium|low", "category": "...", "summary": "..." },
   ...
@@ -67,14 +73,24 @@ function chunk(arr, size) {
   return out;
 }
 
-async function classifyChunk(client, items) {
-  const input = items.map((it) => ({
+function toInput(it) {
+  const base = {
     message_id: it.messageId,
     sender: it.senderName,
     chat_name: it.chatName || (it.isDM ? 'Direct message' : 'group'),
     is_broadcast: !!it.isBroadcast, // @all blast — bias low (see system prompt)
-    text: it.text.slice(0, 2000), // keep payload bounded
-  }));
+  };
+  // R6: a bundled row (DM unread run / thread slice) → send the whole conversation;
+  // otherwise the single message, as before. Per-message text is already clipped at
+  // bundle-build time, so just bound the single-message path here.
+  if (it.bundle && it.bundle.length) {
+    return { ...base, kind: it.bundleType, messages: it.bundle.map((m) => ({ from: m.you ? 'me' : (m.sender || '—'), text: m.text })) };
+  }
+  return { ...base, text: it.text.slice(0, 2000) };
+}
+
+async function classifyChunk(client, items) {
+  const input = items.map(toInput);
   const resp = await client.messages.create({
     model: config.model,
     max_tokens: 8192,
