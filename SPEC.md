@@ -44,11 +44,16 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       (a lone, long @-line skips the fetch). ≤15-word bundle summary that leads with the
       ask; verbatim still shows the latest. @all stays single + downranked. Thread rows
       carry a `🧵 <topic>` label so several threads in one chat are distinguishable.
+- [x] **R3 — Concise / expandable digest** *(2026-06-24)*: the digest card migrated to the
+      **v2 schema** (`schema: "2.0"`, top-level `elements` → `body.elements`, text as `markdown`
+      elements, jump buttons carry their URL via `behaviors[open_url]`), and the **LOW / FYI**
+      bucket now renders inside a **collapsed `collapsible_panel`** — HIGH + MEDIUM stay
+      expanded. The panel header keeps the count (`🟢 LOW / FYI (N)`) so you see how many low
+      items exist without expanding; the per-bucket cap + "+N more" line live inside it.
+      Verified end-to-end on self-chat (card accepted + delivered). Discovered + worked around:
+      **schema 2.0 drops the `note` element** — footer + overflow line moved to `markdown`.
 
-**🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R3 → R2 launch**.
-- [ ] **R3 — Concise / expandable digest** (NEXT UP — next session): collapse **only the
-      LOW/FYI** section by default; HIGH + MEDIUM stay expanded. Render path confirmed —
-      `collapsible_panel` works on self-chat (spike 2026-06-24).
+**🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R2 launch**.
 - [ ] **R2 — Hosted bot** (committed; the launch step after R3 — Lark app **configured +
       approved** on Tessa's side, 2026-06-24): frictionless, installable + runnable *without
       an IDE*, ideally entirely inside Lark. **Pre-launch gate:** add the R6 thread-summary
@@ -365,6 +370,7 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | `messages-search` time format | Numeric offset, no ms (`+00:00`); `.sssZ` → `99992402` |
 | `message_position` indexing | **0-indexed** — a chat's first message is `"0"`, a real comparable value. Only the `-3` thread sentinel and a missing/garbage value are uncomparable. Don't conflate a real `0` with "absent" (use `parsePosition` → integer-or-`null`, not `parseInt() \|\| 0`), or a replied-to first message sticks forever |
 | Patch/edit a sent card | No message-patch method → re-render + resend |
+| Card **schema 2.0** element support | `collapsible_panel` needs schema 2.0, but 2.0 **drops `note`** — a 2.0 card with a `note` is rejected (`200861 … unsupported tag note`). Use `markdown` for small/footer text; `hr`/`markdown`/`button` survive. Text is a standalone `markdown` element; buttons carry their URL via `behaviors:[{type:"open_url",default_url}]`, not a top-level `url`. (2026-06-24) |
 | Fetch a **full thread's** messages | `im +threads-messages-list --thread <omt_/om_> --sort asc\|desc` returns the same enriched shape as search (decoded `content`, real `thread_message_position`); `+chat-messages-list` does the same for a p2p/chat. **Gotcha:** `--help` advertises `page_size` 1–500, but the API really caps it at **50** — request more and it **silently returns 0 messages** (no error), so a naive whole-thread fetch fails open to nothing. Clamp to 50. (2026-06-24) |
 | Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+…) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, so fully reconstructable from `chat_id`+`message_position`) |
 | Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies, so they're watermarked on **`thread_message_position`** (a real per-thread sequence) via the per-thread watermark — **shipped, R4**. Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both — so a message with neither still surfaces once (residual) |
@@ -438,23 +444,32 @@ this is the dominant cost lever, so it gates launch.
   user-identity context to read *their* mentions/DMs. Onboarding that without an
   IDE/CLI is the crux. To brainstorm next.
 
-### R3 — Concise / expandable digest (should-have, added 2026-06-18)
+### R3 — Concise / expandable digest (should-have) ✅ shipped 2026-06-24
 
 A busy digest is a wall of text: each row is header + AI summary + verbatim excerpt
 + a Jump button, so ~14 items overflow the card and stop being scannable. Make
 detail collapse by default and expand on demand.
 
-- **Feasibility — confirmed (spike 2026-06-24):** the v2 card `collapsible_panel`
-  component **renders on our delivery surface** (self-chat via `SEND_AS=user`) — a
-  test card came through correctly. Today's card is the **v1 schema** (`div`/`hr`/
-  `note`/`action`), so R3 entails migrating `buildCard.js` to the v2 schema, then
-  wrapping the collapsed section. Fallbacks (no longer needed): show-more on the
-  verbatim, or dense one-line rows.
-- **Decision (refined by Tessa, 2026-06-24):** collapse **only the LOW / FYI**
-  section by default; **HIGH and MEDIUM stay expanded** — top-prio items are usually
-  short and get actioned quickly, so collapsing them costs more than it saves. (Was:
-  "keep HIGH expanded, collapse MEDIUM/LOW.") This also keeps the core "triage
-  *without opening the chat*" goal intact for the items that matter most.
+**As built (2026-06-24):** `buildCard.js` migrated from the v1 card schema to **v2
+(`schema: "2.0"`)** — required because `collapsible_panel` is a v2-only component and a
+card can't mix v1/v2. The **LOW / FYI** bucket renders inside a single collapsed
+`collapsible_panel`; **HIGH + MEDIUM stay flat/expanded** (top-prio items are short and
+actioned quickly, so collapsing them costs more than it saves). The panel header carries
+the **count** (`🟢 LOW / FYI (N)`) so the collapsed state still tells you how many low
+items exist; the existing `LOW_DISPLAY_LIMIT` cap + "+N more" line moved inside the panel.
+No new env knob — the collapse target is fixed. Verified end-to-end by delivering a real
+card to self-chat (`SEND_AS=user`).
+
+- **Schema-migration mapping:** top-level `elements` → `body.elements`; `div`+`lark_md`
+  text → standalone `markdown` elements; `action`+`button{url}` → standalone `button` with
+  `behaviors:[{type:"open_url",default_url}]`; `wide_screen_mode` config → `update_multi`.
+- **Gotcha (recorded in the limitations table):** **schema 2.0 dropped the `note`
+  element** — the live send rejected it (`200861 … unsupported tag note`). The footer and
+  the LOW "+N more" overflow line, both `note` in v1, are now `markdown`. `hr` survives.
+- **Unverified residual:** the spike + ship were both on **self-chat (user mode)**. Bot-mode
+  (`SEND_AS=bot`, the R2 surface) uses the same render engine so it should be identical, but
+  v2 rendering there is formally unconfirmed — worth a 1-card check when R2 wires bot send.
+- Fallbacks considered + not needed: show-more on the verbatim, or dense one-line rows.
 
 ### R4 — Thread-aware unread, both directions (bug fix) ✅ shipped 2026-06-23
 

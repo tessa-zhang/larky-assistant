@@ -255,8 +255,9 @@ test('buildDigestCard groups by urgency and caps the LOW bucket', () => {
 
   const card = buildDigestCard({ items, since: NOW, generatedAt: NOW, footerHint: 'hint' });
 
+  assert.equal(card.schema, '2.0');             // v2 card (collapsible_panel needs it)
   assert.ok(card.header.title.content.startsWith('📋'));
-  const text = JSON.stringify(card.elements);
+  const text = JSON.stringify(card.body.elements);
   assert.ok(text.includes('HIGH PRIORITY'));
   assert.ok(text.includes('LOW / FYI'));
   assert.ok(text.includes('more low/FYI'));   // low bucket: only lowDisplayLimit shown, rest summarised
@@ -266,11 +267,34 @@ test('buildDigestCard groups by urgency and caps the LOW bucket', () => {
   assert.ok(text.includes('hint'));           // footer
 });
 
+test('buildDigestCard (R3) collapses ONLY low/FYI behind a panel; high/medium stay flat', () => {
+  const items = [
+    { n: 1, urgency: 'high', category: 'incident', summary: 'prod down', isDM: false, chatName: 'ops', senderName: 'Alice', text: 'checkout 500s', chatUnreadCount: 1, link: 'https://x', createTime: NOW },
+    { n: 2, urgency: 'medium', category: 'review_request', summary: 'review my PRD', isDM: false, chatName: 'eng', senderName: 'Bob', text: 'PTAL', chatUnreadCount: 1, link: 'https://y', createTime: NOW },
+    { n: 3, urgency: 'low', category: 'fyi', summary: 'fyi note', isDM: true, chatName: 'Carol', senderName: 'Carol', text: 'just so you know', chatUnreadCount: 1, link: null, createTime: NOW },
+  ];
+  const top = buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements;
+
+  // Exactly one collapsible panel, collapsed, holding the low bucket with its count.
+  const panels = top.filter((e) => e.tag === 'collapsible_panel');
+  assert.equal(panels.length, 1);
+  assert.equal(panels[0].expanded, false);
+  assert.ok(panels[0].header.title.content.includes('LOW / FYI'));
+  assert.ok(panels[0].header.title.content.includes('(1)'));        // count visible while collapsed
+  assert.ok(JSON.stringify(panels[0].elements).includes('fyi note')); // low item lives INSIDE the panel
+
+  // High/medium are NOT inside any panel — they sit flat at the top level.
+  const flat = JSON.stringify(top.filter((e) => e.tag !== 'collapsible_panel'));
+  assert.ok(flat.includes('prod down'));   // high summary rendered expanded
+  assert.ok(flat.includes('review my PRD')); // medium summary rendered expanded
+  assert.ok(!flat.includes('fyi note'));     // low summary is NOT at the top level
+});
+
 test('buildDigestCard marks thread rows with a 🧵 and the thread topic', () => {
   const items = [
     { n: 1, urgency: 'medium', category: 'question', summary: 'weigh in on rollout', isDM: false, bundleType: 'thread', threadTopic: 'staged rollout plan', chatName: 'eng', senderName: 'Dana', text: 'thoughts?', chatUnreadCount: 4, link: 'https://x', createTime: NOW },
   ];
-  const text = JSON.stringify(buildDigestCard({ items, since: NOW, generatedAt: NOW }).elements);
+  const text = JSON.stringify(buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements);
   assert.ok(text.includes('🧵'));                 // thread marker
   assert.ok(text.includes('staged rollout plan')); // topic disambiguates threads in the same chat
   assert.ok(text.includes('+3 more'));            // chatUnreadCount 4 → +3 more

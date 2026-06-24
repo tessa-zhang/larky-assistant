@@ -36,6 +36,12 @@ function itemLabel(item) {
   return base;
 }
 
+/**
+ * Card-2.0 elements for one digest item: a markdown block (header + AI summary +
+ * verbatim excerpt) followed by an optional jump button. In the v2 schema text is
+ * a standalone `markdown` element and a button carries its URL via `behaviors`
+ * (the v1 `div`+`lark_md` / `action`+`url` shapes are gone).
+ */
 function itemBlock(item, now) {
   const meta = URGENCY_META[item.urgency] || URGENCY_META.low;
   const ago = relativeTime(item.createTime, now);
@@ -49,23 +55,58 @@ function itemBlock(item, now) {
   const raw = previewText(item.text, config.rawPreviewChars);
   const rawLine = raw ? `\n💬 ${item.isDM ? '' : `**${md(item.senderName)}:** `}${md(raw)}` : '';
   const elements = [
-    { tag: 'div', text: { tag: 'lark_md', content: `${header}\n${summary}${rawLine}` } },
+    { tag: 'markdown', content: `${header}\n${summary}${rawLine}` },
   ];
   if (item.link) {
     elements.push({
-      tag: 'action',
-      actions: [
-        { tag: 'button', text: { tag: 'plain_text', content: '↗ Jump to message' }, type: 'primary', url: item.link },
-      ],
+      tag: 'button',
+      text: { tag: 'plain_text', content: '↗ Jump to message' },
+      type: 'primary',
+      size: 'small',
+      behaviors: [{ type: 'open_url', default_url: item.link }],
     });
   }
   return elements;
 }
 
+/** Section title line, e.g. "🟢 **LOW / FYI**  (12)". */
+function sectionTitle(meta, count) {
+  return `${meta.emoji} **${meta.label}**  (${count})`;
+}
+
 /**
- * Build a Lark interactive card from numbered, classified items.
+ * The LOW/FYI bucket as a collapsed `collapsible_panel` (R3). The header still
+ * carries the count so you see how many low items exist without expanding; the
+ * items (capped + "+N more" line) live inside, revealed on demand. HIGH/MEDIUM
+ * are never collapsed — they're rendered flat by the caller.
+ */
+function lowPanel(bucket, now) {
+  const shown = bucket.slice(0, config.lowDisplayLimit);
+  const inner = [];
+  for (const it of shown) inner.push(...itemBlock(it, now));
+  if (bucket.length > shown.length) {
+    // (schema 2.0 dropped the `note` element — render the overflow line as markdown.)
+    inner.push({ tag: 'markdown', content: `…+${bucket.length - shown.length} more low/FYI (use \`done\` to clear)` });
+  }
+  return {
+    tag: 'collapsible_panel',
+    expanded: false,
+    header: {
+      title: { tag: 'markdown', content: sectionTitle(URGENCY_META.low, bucket.length) },
+      vertical_align: 'center',
+      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '16px 16px' },
+      icon_position: 'right',
+      icon_expanded_angle: -180,
+    },
+    elements: inner,
+  };
+}
+
+/**
+ * Build a Lark interactive card (schema 2.0) from numbered, classified items.
  * `items` must each carry: n, urgency, category, summary, chatName, isDM,
- * createTime, link.
+ * createTime, link. HIGH + MEDIUM render expanded; LOW/FYI is collapsed behind a
+ * `collapsible_panel` so a busy digest stays scannable (R3).
  */
 export function buildDigestCard({ items, since, generatedAt = new Date(), footerHint }) {
   const now = generatedAt;
@@ -75,10 +116,7 @@ export function buildDigestCard({ items, since, generatedAt = new Date(), footer
   for (const it of items) (groups[it.urgency] || groups.low).push(it);
 
   const elements = [
-    {
-      tag: 'div',
-      text: { tag: 'lark_md', content: `Showing **${items.length}** mention${items.length === 1 ? '' : 's'} & DM${items.length === 1 ? '' : 's'} ${sinceText(since)}` },
-    },
+    { tag: 'markdown', content: `Showing **${items.length}** mention${items.length === 1 ? '' : 's'} & DM${items.length === 1 ? '' : 's'} ${sinceText(since)}` },
   ];
 
   for (const key of Object.keys(groups).sort((a, b) => URGENCY_ORDER[a] - URGENCY_ORDER[b])) {
@@ -86,28 +124,27 @@ export function buildDigestCard({ items, since, generatedAt = new Date(), footer
     if (bucket.length === 0) continue;
     const meta = URGENCY_META[key];
     elements.push({ tag: 'hr' });
-    elements.push({ tag: 'div', text: { tag: 'lark_md', content: `${meta.emoji} **${meta.label}**  (${bucket.length})` } });
-    // Cap the LOW/FYI bucket so a noisy digest stays scannable.
-    const limit = key === 'low' ? config.lowDisplayLimit : Infinity;
-    const shown = bucket.slice(0, limit);
-    for (const it of shown) elements.push(...itemBlock(it, now));
-    if (bucket.length > shown.length) {
-      elements.push({ tag: 'note', elements: [{ tag: 'plain_text', content: `…+${bucket.length - shown.length} more low/FYI (use \`done\` to clear)` }] });
+    if (key === 'low') {
+      // Collapsed by default — keeps low/FYI noise out of the way until expanded.
+      elements.push(lowPanel(bucket, now));
+    } else {
+      elements.push({ tag: 'markdown', content: sectionTitle(meta, bucket.length) });
+      for (const it of bucket) elements.push(...itemBlock(it, now));
     }
   }
 
   elements.push({ tag: 'hr' });
-  elements.push({
-    tag: 'note',
-    elements: [{ tag: 'plain_text', content: footerHint || '↩ type `digest` to refresh' }],
-  });
+  // schema 2.0 dropped the `note` element; the footer is a trusted internal hint
+  // (its backticks are intentional code-spans), so render it as markdown unescaped.
+  elements.push({ tag: 'markdown', content: footerHint || '↩ type `digest` to refresh' });
 
   return {
-    config: { wide_screen_mode: true },
+    schema: '2.0',
+    config: { update_multi: true },
     header: {
       template: 'blue',
       title: { tag: 'plain_text', content: `📋 Your Triage Digest — ${formatDateTime(now)}` },
     },
-    elements,
+    body: { elements },
   };
 }
