@@ -36,8 +36,9 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       truly absent value are uncomparable. *(2026-06-23)*
 
 **🔜 Next** (detail in [Roadmap](#roadmap))
-- [ ] **R6 — Per-chat multi-message summary**: summarise across all unread in a chat,
-      not just the latest (verbatim line still shows the latest)
+- [ ] **R6 — Multi-message summary** (NEXT UP, sharpened 2026-06-23): summarise the
+      whole unread bundle so I can decide *without opening the chat* — per **thread**
+      for group @s, per **DM** for DMs; ≤15-word summary, verbatim still shows the latest
 - [ ] **R5 — cc-mention down-ranking**: detect textual `cc @me`, tag + bias low (3rd
       lane alongside @all)
 - [ ] **R3 — Concise / expandable digest** (should-have): collapse the digest so a
@@ -474,15 +475,40 @@ classification (only reaching higher when it genuinely asks something of me).
   let the classifier judge from text (it already sees it) — likely the heuristic
   flag for the tag + a prompt nudge, mirroring `is_broadcast`.
 
-### R6 — Per-chat multi-message summary (should-have, added 2026-06-18)
+### R6 — Multi-message summary across the unread bundle (should-have; sharpened 2026-06-23, NEXT UP)
 
-Today we collapse a chat to its latest unread message and the AI summarises only
-that one; the `+N more` count is real but the other messages' content is discarded.
-Summarise across **all** unread messages in the chat instead ("3 msgs: needs
-sign-off on X, plus a follow-up on Y"). **Decided:** the verbatim `💬` line keeps
-showing the **latest** message; only the AI summary spans the bundle. Pairs with
-R4, and softens Item A's multiple-@ collapse (earlier @ content stops being
-invisible). Cost: a bit more classification payload per chat — fine.
+**Why this is the top priority:** the whole reason inlark exists is to decide whether
+to respond *without opening the chat*. Today we collapse a chat to its latest unread
+message and summarise only that one — so any multi-message ask is invisible until you
+open it. Summarise the **whole unread bundle** instead. The unread set is exactly the
+messages where `isUnread === true` (position > my watermark, or from 0 if I've never
+posted — the position-0 fix makes "from 0" correct).
+
+**The bundle, by surface (Tessa, 2026-06-23):**
+- **DM:** all messages from *after my last sent message* through their latest — the
+  unread run (or from the start if I've never replied). One row per DM.
+- **Group @mention in a thread** (whether I'm @'d in the thread root *or* a reply):
+  the unit is the **thread/topic**, not the chat. Summarise the thread's messages for
+  context + **what I'm @mentioned for**. One row **per thread** — a busy group can yield
+  several rows. *Rationale (Tessa): in groups, topics live in separate threads, so two
+  messages in different threads are usually unrelated; bundling a whole group flat would
+  mix topics.*
+- **Group @mention not in a thread** (plain main-timeline @): nothing to bundle →
+  single-message summary, as today.
+
+**Decided:**
+- Summary stays **≤15 words** even for a bundle (2026-06-23) → it must *lead with the
+  actionable ask*, not enumerate. The verbatim `💬` line still shows the latest message.
+- Grouping unit shifts from per-**chat** to per-**thread** for threaded mentions
+  (extends R4's thread axis — likely a `dedupeByThread` alongside `dedupeByChat`).
+
+**Open / to settle when we start (logged 2026-06-23):**
+- Thread bundle = the **unread** portion only, or the **whole thread** for context?
+  (Tessa leans whole-thread for context; the ≤15-word cap + fetch cost argue for an
+  unread-led summary with light prior context.)
+- **Feasibility:** can `lark-cli` fetch a full thread's messages (vs only the
+  `--is-at-me` search results)? Verify the fetch path before committing to whole-thread.
+- **@all broadcasts:** keep as single-message + downranked (not bundled) — confirm.
 
 ### R7 — Interactive per-item done/snooze (should-have, added 2026-06-18)
 
