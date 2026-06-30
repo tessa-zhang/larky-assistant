@@ -52,12 +52,39 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       items exist without expanding; the per-bucket cap + "+N more" line live inside it.
       Verified end-to-end on self-chat (card accepted + delivered). Discovered + worked around:
       **schema 2.0 drops the `note` element** — footer + overflow line moved to `markdown`.
+- [x] **R2 pre-launch token guard — per-thread summary cache** *(2026-06-24)*: a thread row's
+      classification (urgency / category / ≤15-word summary) is cached in `state.json`, keyed by
+      `thread_id` + newest `thread_message_position` + my per-thread watermark (`threadCacheKey`).
+      On a later run an **unchanged** thread (no new message, I haven't replied) reuses the stored
+      answer with **zero Anthropic tokens** — only the token-free Lark thread fetch (which is how
+      we detect "unchanged") still runs. Orphaned keys (a thread advanced ⇒ its old key never
+      matches) age out via a TTL (`THREAD_CACHE_TTL_HOURS`, default 14d; `0` = kill switch).
+      Per-user by construction (cache lives in that user's state; the key encodes my watermark).
+      **Closes the R2 pre-launch gate.** Unit-tested; **live two-run verification done 2026-06-26**
+      — a bot-mode rerun on the same backlog reused a thread summary at **0 Anthropic tokens**.
 
 **🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R2 launch**.
-- [ ] **R2 — Hosted bot** (committed; the launch step after R3 — Lark app **configured +
-      approved** on Tessa's side, 2026-06-24): frictionless, installable + runnable *without
-      an IDE*, ideally entirely inside Lark. **Pre-launch gate:** add the R6 thread-summary
-      **caching** (token guard) before exposing to teammates.
+- [ ] **R2 — Hosted bot** (committed; the launch step after R3): frictionless, installable +
+      runnable *without an IDE*, ideally entirely inside Lark. **Pre-launch token-guard gate:
+      ✅ shipped + live-verified 2026-06-26** (per-thread summary cache, above). **Decisions
+      (2026-06-24):** real **bot** delivery surface (not self-chat) + **curated** beta auth —
+      named beta users authorize their own user token once via a link; self-serve in-Lark OAuth
+      is the fast-follow. **Auth mechanism settled (2026-06-26): device flow via lark-cli
+      profiles** — lark-cli is multi-user via `profile` (+ per-command `--profile`), so each user
+      gets a profile and lark-cli owns token storage/refresh; no custom OAuth server/token store
+      needed for the beta. (Code flow = the one-tap self-serve upgrade later; needs a public
+      redirect endpoint + our own token store + moving reads off lark-cli.)
+      **✅ Bot UNBLOCKED + single-user loop proven (2026-06-26):** admin published/provisioned the
+      bot on a **new app** `cli_aaaba7cf9a211ed1`; `bot_identity: pass`. User identity
+      re-established on the new app via **device-flow login** (`auth login --no-wait` → approve QR
+      → `--device-code`; granted `im`+`contact`+`search:message`+`offline_access`; new per-app
+      open_id `ou_1e1aec…`). `npm run digest` verified end-to-end in **both** user-mode (self-chat,
+      15 items) and **bot-mode** (the R2 surface — v2 card delivered, cache reused 1 summary at 0
+      tokens). **Remaining for R2:** the multi-user build — (1) bot-driven onboarding
+      (`p2p_chat_create` → Authorize card → per-user device-flow into a fresh profile),
+      (2) per-user state (done/snooze/cache keyed by user), (3) multi-tenant listener that routes
+      each user's `digest`/`done`/`snooze` to a run under their `--profile`, (4) an always-on host
+      for the event listener.
 - [ ] **R5 — cc-mention down-ranking**: detect textual `cc @me`, tag + bias low (3rd
       lane alongside @all)
 - [ ] **R7 — Interactive per-item done/snooze**: per-row buttons; `done` drops a ✅
@@ -374,6 +401,7 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | Fetch a **full thread's** messages | `im +threads-messages-list --thread <omt_/om_> --sort asc\|desc` returns the same enriched shape as search (decoded `content`, real `thread_message_position`); `+chat-messages-list` does the same for a p2p/chat. **Gotcha:** `--help` advertises `page_size` 1–500, but the API really caps it at **50** — request more and it **silently returns 0 messages** (no error), so a naive whole-thread fetch fails open to nothing. Clamp to 50. (2026-06-24) |
 | Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+…) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, so fully reconstructable from `chat_id`+`message_position`) |
 | Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies, so they're watermarked on **`thread_message_position`** (a real per-thread sequence) via the per-thread watermark — **shipped, R4**. Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both — so a message with neither still surfaces once (residual) |
+| Send **as bot** (`SEND_AS=bot`, the R2 surface) | Can fail `[11205] app do not have bot` **even when the dev console shows Bot enabled + all approved and local creds are valid** (`lark-cli doctor` → `app_resolved` pass, `bot_identity` warn). `auth status` showing bot "ready" is **misleading** — it means the token is *valid*, not that a bot is *provisioned*. Root cause by elimination (2026-06-24): **tenant provisioning** — the app/bot must be *installed / made available in the workspace* (a Lark-admin step), separate from dev-console enable+approve. Not fixable client-side; not a scope, secret, publish, CLI-version, or token-cache issue (all ruled out). Verify with `lark-cli doctor` (`bot_identity: pass`), not `auth status`. **Resolved 2026-06-26** — admin published/provisioned the bot on a **new app** (`cli_aaaba7cf9a211ed1`), so `bot_identity` flipped to `pass`; the user identity was then re-established on the new app via **device-flow login** (`auth login --no-wait` → approve QR → `--device-code`). NB: a new app ⇒ a **new per-app open_id** (auto-detected; don't pin `LARK_USER_OPEN_ID` to the old one) |
 
 ## Non-functional requirements
 
@@ -421,15 +449,30 @@ user designate **priority groups**; messages there get evaluated too.
 **install and run it without an IDE**, ideally entirely within Lark (DM the bot
 `digest`). **Prioritise frictionless setup above everything else.**
 
-**Status (2026-06-24):** the Lark app is **configured + approved** on Tessa's side
-(bot capability + scopes/publish handled there). Remaining crux: per-user auth
-onboarding (below), and the pre-launch token guard.
+**Status (2026-06-24):** the Lark app is configured + approved in the dev console
+(Bot enabled, scopes/publish handled), **but bot send is still blocked** — see the
+blocker below. Decisions this session: **real bot** delivery surface + **curated**
+beta auth (named users authorize once via a link; self-serve OAuth as fast-follow).
+Pre-launch token guard: **✅ shipped**. Remaining crux once unblocked: the per-user
+auth onboarding (below).
 
-**Pre-launch gate — token cost:** R6's thread bundling makes each row bigger, and a
-stateless run re-summarises *everything* each time; before exposing the bot to teammates,
-add the per-thread **summary cache** (keyed by `thread_id` + newest `thread_message_position`
-+ watermark — see R6) so repeat runs on unchanged threads cost ~zero. At multi-user scale
-this is the dominant cost lever, so it gates launch.
+**⛔ Bot-send blocker (2026-06-24):** `SEND_AS=bot` fails `[11205] app do not have bot`.
+Ruled out, in order: bot scopes (console shows enabled+approved), app secret (present +
+valid — `doctor app_resolved` passes), publish/approval state (all approved, nothing
+pending), stale local token cache (cleared, no change), CLI version (1.0.51 self-update
+IT-blocked, but the error is a server-side semantic response, not a client crash).
+Remaining cause by elimination: **tenant provisioning** — the app/bot is enabled+approved
+in the dev console but not *installed / made available in the Traveloka workspace*, a
+separate Lark-admin step. **Pending workspace admin.** `auth status` reporting bot "ready"
+is misleading (token valid ≠ bot provisioned); the authoritative check is `lark-cli doctor`
+→ `bot_identity`. Build resumes when that flips to `pass`.
+
+**Pre-launch gate — token cost (✅ shipped 2026-06-24):** R6's thread bundling makes each
+row bigger, and a stateless run re-summarises *everything* each time; the per-thread
+**summary cache** (keyed by `thread_id` + newest `thread_message_position` + my watermark)
+now lets repeat runs on unchanged threads cost ~zero Anthropic tokens. At multi-user scale
+this was the dominant cost lever, so it gated launch — now closed. See the Shipped tracker
+entry for mechanics (`threadCacheKey`, `THREAD_CACHE_TTL_HOURS`, per-user).
 
 - **Implies:** bot capability activated (✅ confirmed 2026-06-17 — `232025` is
   gone), then the app must **apply the scopes + publish a version** (✅ done on Tessa's

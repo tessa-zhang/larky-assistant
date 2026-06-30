@@ -53,7 +53,7 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
   const sinceDate = new Date(since); // fixed lookback window start
   const runAt = new Date();
 
-  if (ack) await deliver(delivery, '⏳ Fetching your mentions, give me a moment…');
+  if (ack) await deliver(delivery, '⏳ Priotising your mentions, give me a moment…');
 
   const { items, skipped } = await fetchSince(since, self, state);
 
@@ -65,20 +65,39 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
     return { count: 0, skipped };
   }
 
-  const classified = await classify(items);
-  for (const it of items) Object.assign(it, classified.get(it.messageId));
+  // R2 token guard: reuse cached per-thread summaries so an UNCHANGED thread costs
+  // ZERO Anthropic tokens (the dominant cost lever at multi-user scale — see SPEC R2
+  // pre-launch gate). Only thread-bundle rows carry a `cacheKey`; the token-free Lark
+  // thread fetch already ran (it's how we know the thread is unchanged). ttl<=0 is a
+  // kill switch: prune clears the cache and we classify everything.
+  const cacheOn = config.threadCacheTtlHours > 0;
+  store.pruneSummaryCache(state, config.threadCacheTtlHours);
+  const toClassify = [];
+  let cachedCount = 0;
+  for (const it of items) {
+    const hit = cacheOn && it.cacheKey ? store.getCachedSummary(state, it.cacheKey) : null;
+    if (hit) { Object.assign(it, hit); cachedCount++; }
+    else toClassify.push(it);
+  }
+
+  const classified = await classify(toClassify);
+  for (const it of toClassify) {
+    const c = classified.get(it.messageId);
+    Object.assign(it, c);
+    if (cacheOn && it.cacheKey) store.setCachedSummary(state, it.cacheKey, c); // reuse next run
+  }
   numberItems(items);
 
   const card = buildDigestCard({ items, since: sinceDate, generatedAt: runAt, footerHint });
   await deliver(delivery, card, 'interactive');
 
-  // The bundle (DM run / thread slice) was only needed to classify; drop it so the
-  // snapshot done/snooze re-renders from stays lean (it keeps bundleType/threadTopic).
-  for (const it of items) delete it.bundle;
+  // The bundle + cache bookkeeping were only needed for classification; drop them so
+  // the snapshot done/snooze re-renders from stays lean (it keeps bundleType/threadTopic).
+  for (const it of items) { delete it.bundle; delete it.cacheKey; }
   state.lastRunAt = runAt.toISOString();
   state.lastDigest = { generatedAt: runAt.toISOString(), since, items };
   await store.save(state);
-  return { count: items.length, skipped };
+  return { count: items.length, cached: cachedCount, skipped };
 }
 
 /** Resolve card numbers → items from the last delivered digest. */

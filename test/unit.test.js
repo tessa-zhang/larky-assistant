@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 
 import { relativeTime, formatDateTime, formatDate, MS_PER_HOUR } from '../src/time.js';
 import { isExcludedChatName, config } from '../src/config.js';
-import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, jumpLink, parsePosition } from '../src/fetchMentions.js';
+import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, jumpLink, parsePosition, threadCacheKey } from '../src/fetchMentions.js';
 import { reactedIdsFromDetails } from '../src/lark.js';
 import { extractJson } from '../src/classify.js';
 import { buildDigestCard, previewText } from '../src/buildCard.js';
-import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze } from '../src/state.js';
+import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, getCachedSummary, setCachedSummary, pruneSummaryCache } from '../src/state.js';
 
 const NOW = new Date('2026-06-16T12:00:00Z');
 
@@ -298,4 +298,54 @@ test('buildDigestCard marks thread rows with a 🧵 and the thread topic', () =>
   assert.ok(text.includes('🧵'));                 // thread marker
   assert.ok(text.includes('staged rollout plan')); // topic disambiguates threads in the same chat
   assert.ok(text.includes('+3 more'));            // chatUnreadCount 4 → +3 more
+});
+
+// --- R2 token guard: per-thread summary cache --------------------------------
+
+test('threadCacheKey is stable for the same thread state and shifts when it changes', () => {
+  const base = threadCacheKey('omt_1', 12, 5);
+  assert.equal(base, threadCacheKey('omt_1', 12, 5));        // same inputs → same key (cache hit)
+  assert.notEqual(base, threadCacheKey('omt_1', 13, 5));     // new message (newest pos bumps) → miss
+  assert.notEqual(base, threadCacheKey('omt_1', 12, 6));     // I replied (watermark moves) → miss
+  assert.notEqual(base, threadCacheKey('omt_2', 12, 5));     // different thread → miss
+});
+
+test('threadCacheKey returns null (uncacheable) without a thread id or newest position', () => {
+  assert.equal(threadCacheKey(null, 5, 1), null);
+  assert.equal(threadCacheKey('omt_1', null, 1), null);
+  // A never-replied thread (no watermark) is still cacheable — key encodes "none".
+  assert.equal(threadCacheKey('omt_1', 5, null), 'omt_1|5|none');
+  // Position 0 is a REAL newest position (0-indexed), not "missing" — must cache.
+  assert.equal(threadCacheKey('omt_1', 0, 0), 'omt_1|0|0');
+});
+
+test('summary cache stores and reuses a classification, refreshing recency on hit', () => {
+  const state = { threadSummaryCache: {} };
+  const cls = { urgency: 'high', category: 'incident', summary: 'rollback the deploy now' };
+  const t0 = new Date('2026-06-20T00:00:00Z');
+  setCachedSummary(state, 'k1', cls, t0);
+
+  const hit = getCachedSummary(state, 'k1', NOW);
+  assert.deepEqual(hit, cls);                                   // exact classification reused (0 tokens)
+  assert.equal(state.threadSummaryCache.k1.savedAt, NOW.toISOString()); // recency refreshed on hit
+  assert.equal(getCachedSummary(state, 'missing'), null);       // miss → null → caller classifies
+  assert.equal(getCachedSummary(state, null), null);            // uncacheable row → null
+});
+
+test('pruneSummaryCache drops orphaned (stale) entries but keeps fresh ones', () => {
+  const state = {
+    threadSummaryCache: {
+      fresh: { urgency: 'low', category: 'fyi', summary: 'x', savedAt: new Date(NOW - 2 * MS_PER_HOUR).toISOString() },
+      stale: { urgency: 'low', category: 'fyi', summary: 'y', savedAt: new Date(NOW - 100 * MS_PER_HOUR).toISOString() },
+    },
+  };
+  pruneSummaryCache(state, 24, NOW); // 24h TTL
+  assert.ok(state.threadSummaryCache.fresh);   // 2h old → kept
+  assert.ok(!state.threadSummaryCache.stale);  // 100h old → orphan aged out
+});
+
+test('pruneSummaryCache with ttl<=0 clears the whole cache (kill switch)', () => {
+  const state = { threadSummaryCache: { a: { savedAt: NOW.toISOString() } } };
+  pruneSummaryCache(state, 0, NOW);
+  assert.deepEqual(state.threadSummaryCache, {});
 });

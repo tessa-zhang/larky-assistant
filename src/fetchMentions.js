@@ -75,6 +75,24 @@ export function parsePosition(raw) {
   return Number.isNaN(n) || n < 0 ? null : n;
 }
 
+/**
+ * Cache key for a thread row's summary (R2 token guard — see SPEC R2 pre-launch
+ * gate + state.getCachedSummary). Three inputs fully determine the bundle we'd send
+ * Claude, so they fully determine the answer:
+ *   - `threadId`           — which thread,
+ *   - `newestPos`          — the thread's newest message position; a new message
+ *                            bumps it ⇒ key changes ⇒ re-summarise (the bundle grew),
+ *   - `threadWatermark`    — my latest reply position in the thread; if I reply, the
+ *                            unread tail + "what I must do" shift ⇒ re-summarise.
+ * Returns null (⇒ not cacheable) when there's no thread id or no comparable newest
+ * position. The key is per-user because `threadWatermark` is mine and the summary is
+ * framed around what *I* must do.
+ */
+export function threadCacheKey(threadId, newestPos, threadWatermark) {
+  if (!threadId || newestPos == null) return null;
+  return `${threadId}|${newestPos}|${threadWatermark ?? 'none'}`;
+}
+
 function normalize(msg, { isDM, selfOpenId }) {
   const text = (msg.content || '').trim();
   return {
@@ -290,6 +308,15 @@ async function buildThreadBundle(row, watermark, self) {
 
   const head = slice.find((e) => !e.elided);
   if (head) row.threadTopic = clip(head.text, 32);
+
+  // Stamp the row with its summary-cache key (R2 token guard): the thread's newest
+  // position (across ALL fetched messages, not just my mentions) + my thread
+  // watermark. Computed from the same fetch that detects "unchanged" — token-free.
+  const positions = msgs
+    .map((m) => (m.threadPosition != null ? m.threadPosition : m.position))
+    .filter((p) => p != null);
+  const newestThreadPos = positions.length ? Math.max(...positions) : null;
+  row.cacheKey = threadCacheKey(row.threadId, newestThreadPos, threadWatermark);
 
   return slice.map((e) =>
     e.elided

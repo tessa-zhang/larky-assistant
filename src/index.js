@@ -30,7 +30,8 @@ async function cmdDigest(self) {
   const { delivery, footerHint } = cliDelivery(self);
   console.log(`Running digest (send as ${delivery.as}) for ${self.userName}…`);
   const r = await runDigest({ self, delivery, footerHint, ack: false });
-  console.log(`Delivered: ${r.count} item(s).`, summarizeSkips(r.skipped));
+  const cacheNote = r.cached ? ` (${r.cached} thread summary reused from cache — 0 tokens)` : '';
+  console.log(`Delivered: ${r.count} item(s).${cacheNote}`, summarizeSkips(r.skipped));
 }
 
 async function cmdDone(self, args) {

@@ -77,6 +77,21 @@ export const config = {
   // self-contained — a single @mention whose text is at least this long. Threads
   // with multiple @-lines always fetch (a multi-message ask). 0 disables the gate.
   threadGateChars: Number(process.env.THREAD_GATE_CHARS || 140),
+
+  // --- R2 pre-launch token guard: per-thread summary cache --------------------
+  // Cache each thread row's CLASSIFICATION (urgency/category/summary — the
+  // expensive Anthropic output), keyed by thread_id + newest thread position + my
+  // per-thread watermark (see fetchMentions.threadCacheKey). On a later run an
+  // UNCHANGED thread (no new messages, and I haven't replied) reuses the stored
+  // summary with ZERO Anthropic tokens — the dominant cost lever once colleagues
+  // use this and every stateless run re-summarises the whole backlog. The
+  // token-free Lark thread fetch still runs (it's how we detect "unchanged"); only
+  // the Claude call is skipped. Per-user by construction (the cache lives in that
+  // user's state and the key encodes my watermark). Entries self-orphan as a thread
+  // advances, so a TTL ages orphans out to keep the cache bounded. Default 14d
+  // (matches the watermark lookback — a thread untouched that long won't resurface).
+  // Set THREAD_CACHE_TTL_HOURS=0 to disable the cache (kill switch).
+  threadCacheTtlHours: Number(process.env.THREAD_CACHE_TTL_HOURS ?? 24 * 14),
 };
 
 /**

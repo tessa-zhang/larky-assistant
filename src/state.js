@@ -15,6 +15,10 @@ const EMPTY_STATE = {
   // the numbers shown on the card to message_ids and re-render WITHOUT another
   // fetch/classify round-trip.
   lastDigest: null, // { generatedAt, since, items: [ normalized+classified item ] }
+  // R2 token guard — per-thread summary cache (see SPEC R2 pre-launch gate).
+  // { [cacheKey]: { urgency, category, summary, savedAt } }, keyed by
+  // thread_id + newest thread position + my watermark (fetchMentions.threadCacheKey).
+  threadSummaryCache: {},
 };
 
 export async function load() {
@@ -64,5 +68,44 @@ export function snooze(state, messageIds, hours, now = new Date()) {
   const byId = new Map((state.snoozedMessages || []).map((s) => [s.messageId, s]));
   for (const id of messageIds) byId.set(id, { messageId: id, snoozeUntil });
   state.snoozedMessages = [...byId.values()];
+  return state;
+}
+
+/**
+ * R2 token guard — per-thread summary cache (see SPEC R2 pre-launch gate).
+ * Stores a thread row's classification keyed by thread_id + newest thread position
+ * + my watermark (fetchMentions.threadCacheKey). An unchanged thread on a later run
+ * reuses the stored answer with ZERO Anthropic tokens — the dominant cost lever once
+ * many colleagues use this and every stateless run re-summarises the whole backlog.
+ */
+
+/** Cached classification for `key`, or null. Refreshes recency on hit so live threads stay warm. */
+export function getCachedSummary(state, key, now = new Date()) {
+  const hit = key && state.threadSummaryCache?.[key];
+  if (!hit) return null;
+  hit.savedAt = now.toISOString();
+  return { urgency: hit.urgency, category: hit.category, summary: hit.summary };
+}
+
+/** Store a classification under its cache key. */
+export function setCachedSummary(state, key, { urgency, category, summary }, now = new Date()) {
+  if (!key) return state;
+  (state.threadSummaryCache ||= {})[key] = { urgency, category, summary, savedAt: now.toISOString() };
+  return state;
+}
+
+/**
+ * Drop cache entries older than `ttlHours` — orphaned keys (a thread advanced, so
+ * its old key never matches again) age out, keeping the cache bounded. `ttlHours <= 0`
+ * clears the whole cache (the THREAD_CACHE_TTL_HOURS=0 kill switch).
+ */
+export function pruneSummaryCache(state, ttlHours, now = new Date()) {
+  const cache = state.threadSummaryCache || {};
+  if (!(ttlHours > 0)) { state.threadSummaryCache = {}; return state; }
+  const cutoff = now.getTime() - ttlHours * MS_PER_HOUR;
+  for (const [k, v] of Object.entries(cache)) {
+    if (!v?.savedAt || new Date(v.savedAt).getTime() < cutoff) delete cache[k];
+  }
+  state.threadSummaryCache = cache;
   return state;
 }
