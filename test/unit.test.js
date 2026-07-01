@@ -98,6 +98,26 @@ test('isUnread scopes thread messages to the per-thread watermark (R4)', () => {
   assert.equal(isUnread({ chatId: 'oc_a', position: 80, threadId: 'omt_1', threadPosition: null }, watermark), false);
 });
 
+test('isUnread (Case B): a thread-root/mirrored @mention clears once I reply IN its thread', () => {
+  // Real Lark shape (verified live): an @mention that starts a thread arrives with a real
+  // MAIN position but NO thread_message_position (a "mirrored to main" root). Replying to
+  // it the natural way — inside the thread — raises only the THREAD watermark. Before this
+  // fix, isUnread routed such a message to the chat axis (no thread position), which the
+  // in-thread reply never raises, so it resurfaced forever despite the reply.
+  const rootMention = { chatId: 'oc_b', position: 76, threadId: 'omt_b', threadPosition: null };
+
+  // I've replied in the thread (thread watermark exists) ⇒ addressed ⇒ read.
+  assert.equal(isUnread(rootMention, { chat: new Map(), thread: new Map([['omt_b', 4]]) }), false);
+  // I've engaged neither the thread nor the chat's main timeline ⇒ still unread.
+  assert.equal(isUnread(rootMention, { chat: new Map(), thread: new Map() }), true);
+  // A main-timeline reply past it still clears it too, exactly as before the fix.
+  assert.equal(isUnread(rootMention, { chat: new Map([['oc_b', 80]]), thread: new Map() }), false);
+  // Guard: a positionless message (no main AND no thread position) in an engaged thread is
+  // NOT force-cleared by this branch — it stays the "surfaces once" residual (needs a real
+  // main position to be considered genuinely mirrored/visible).
+  assert.equal(isUnread({ chatId: 'oc_b', position: null, threadId: 'omt_b', threadPosition: null }, { chat: new Map(), thread: new Map([['omt_b', 4]]) }), true);
+});
+
 test('mentionsUser detects a direct @me but not an @all broadcast', () => {
   const me = 'ou_me';
   // Direct mention: my open_id is in the structured mentions[].

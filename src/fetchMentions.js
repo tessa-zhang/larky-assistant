@@ -135,8 +135,14 @@ function normalize(msg, { isDM, selfOpenId }) {
  *   THREAD watermark, ignoring the chat watermark. This fixes R4 in both
  *   directions — an in-thread reply now clears the mention, and posting elsewhere
  *   in the same chat no longer clears a thread the user never engaged.
- * - **Everything else** (non-thread messages, and thread messages mirrored to the
- *   main timeline with a real `message_position`): the per-chat watermark, as before.
+ * - **Thread ROOT / message mirrored to main** (`threadId` set, NO thread position,
+ *   real main position — verified live as the shape an @mention that *starts* a
+ *   thread takes): if I've engaged that thread at all (a thread watermark exists),
+ *   it's addressed ⇒ read. Without this it fell to the chat axis, which a pure
+ *   in-thread reply never raises, so it resurfaced forever despite the reply
+ *   (Case B — the "replied-in-thread but never clears" bug). If I *haven't* engaged
+ *   the thread, it keeps the main axis so a main-timeline reply still clears it.
+ * - **Everything else** (non-thread messages): the per-chat watermark, as before.
  * - **Both positions sentinel** (rare): uncomparable on either axis ⇒ unread; it
  *   surfaces once and is clearable with `done`.
  *
@@ -151,7 +157,14 @@ export function isUnread(item, watermark) {
     if (ownThread == null) return true; // never engaged this thread ⇒ unread
     return item.threadPosition > ownThread;
   }
-  // Main axis: non-thread messages + thread messages mirrored to main.
+  // Thread root / mirrored-to-main message (no thread position, but a real main
+  // position) in a thread I've engaged: my in-thread reply addresses it, so treat it
+  // as read. The chat axis below never would — my reply is a "-3" that doesn't raise
+  // the chat watermark — which is why these resurfaced despite the reply (Case B).
+  // Guarded to `position != null` so a truly positionless message stays the residual.
+  if (item.threadId && item.position != null && watermark.thread.get(item.threadId) != null) return false;
+  // Main axis: non-thread messages + thread messages mirrored to main in a thread I
+  // haven't engaged (a real main position ⇒ a main-timeline reply legitimately clears it).
   // position == null ⇒ no comparable main position (the "-3" sentinel or missing);
   // ownChat == null ⇒ I never posted in this chat — both ⇒ treat as unread.
   // NB: position 0 is REAL (Lark positions are 0-indexed) and compares normally —
