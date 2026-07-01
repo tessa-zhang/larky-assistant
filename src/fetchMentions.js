@@ -67,8 +67,10 @@ export function jumpLink(msg) {
  * Lark message positions are **0-indexed** — the first message in a chat is `"0"`,
  * a genuine value that must compare normally (a reply at position 1 reads it). So
  * we must NOT collapse a real `0` into the same bucket as "missing". Uncomparable
- * cases — which return `null` — are the `-3` thread sentinel (a pure in-thread
- * reply has no main-timeline position) and an absent/garbage value. See SPEC.md.
+ * cases — which return `null` — are the negative sentinels (`-3` for a pure
+ * in-thread reply with no main-timeline position; `-1` also seen on
+ * `thread_message_position`) and an absent/garbage value. Any negative → `null`,
+ * so the exact sentinel value doesn't matter. See SPEC.md.
  */
 export function parsePosition(raw) {
   const n = parseInt(raw, 10);
