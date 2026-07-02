@@ -107,7 +107,8 @@ export const EXCLUDE_CHAT_NAME_PATTERNS = [
   /^merchandising_oncall$/i,
   /^release-and-hotfix$/i,
   /^promo-error-report$/i,
-  /\|\s*Slack$/i, // Slack-mirrored channels, e.g. "something | Slack"
+  // NB: the `… | Slack` (Slack-mirrored) pattern was removed 2026-07-02 — those turned
+  // out to be real human coordination channels, not noise. Tighten again only with cause.
 ];
 
 export function isExcludedChatName(name) {

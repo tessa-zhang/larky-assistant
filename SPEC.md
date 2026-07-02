@@ -74,8 +74,31 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       Per-user by construction (cache lives in that user's state; the key encodes my watermark).
       **Closes the R2 pre-launch gate.** Unit-tested; **live two-run verification done 2026-06-26**
       — a bot-mode rerun on the same backlog reused a thread summary at **0 Anthropic tokens**.
+- [x] **LOW-only digest expands** (R3 refinement) *(2026-07-02)*: when **LOW/FYI is the only
+      bucket** (no HIGH/MEDIUM), it now renders **expanded/flat** instead of inside the collapsed
+      panel — a lone collapsed bucket reads like the empty state and hides the only content behind
+      a tap. Collapse still kicks in whenever HIGH/MEDIUM are present (that's what it protects). The
+      `LOW_DISPLAY_LIMIT` cap + "+N more" line still guard overflow in **both** modes (shared
+      `lowItems` renderer). Unit-tested + visually verified on both paths.
+- [x] **Noise filter no longer hides direct @s** (bug) *(2026-07-02)*: a live trace found a real
+      direct @me in `ta-engineer-coordination | Slack` being dropped (its resolved name carries a
+      hidden `| Slack` suffix). Two fixes: (1) the **`… | Slack` pattern is removed** — those are
+      real human coordination channels, not noise (their @all blasts now surface in the downranked
+      LOW bucket; tighten later only with cause); (2) the remaining noise-name patterns now suppress
+      **broadcasts only** — a **direct @me surfaces even in a noise channel**
+      (`isExcludedChatName && isBroadcast`), since the filter is for @all/automation spam, not
+      people naming me. Bot/app senders are still dropped upstream, so only a real person's ping
+      survives. Unit-tested + verified against the live trace set. *(Same trace confirmed the
+      Case-B/`isUnread` logic is **correct** — a mirrored @ dropped there was genuinely replied to
+      in-thread; not a bug.)*
+- [x] **Digest in-flight guard** (bot-listener hardening) *(2026-07-02)*: a second `digest` sent
+      before the first returns no longer fires a second concurrent pipeline. Each digest is a burst
+      of Lark calls; overlapping runs doubled it and tripped Lark's **`99991400` request-frequency
+      limit** (hit live). A per-listener in-flight flag now ignores duplicate triggers while a run
+      is active — the first run's "⏳ Fetching…" ack already signals it's working. Single-user
+      today; R2 multi-user keys it per user. See the limitations table.
 
-**🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R2 launch**.
+**🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R2 launch**, then **R8** (reliability — bumped 2026-07-02).
 - [ ] **R2 — Hosted bot** (committed; the launch step after R3): frictionless, installable +
       runnable *without an IDE*, ideally entirely inside Lark. **Pre-launch token-guard gate:
       ✅ shipped + live-verified 2026-06-26** (per-thread summary cache, above). **Decisions
@@ -97,14 +120,28 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       (2) per-user state (done/snooze/cache keyed by user), (3) multi-tenant listener that routes
       each user's `digest`/`done`/`snooze` to a run under their `--profile`, (4) an always-on host
       for the event listener.
+- [ ] **R8 — Dynamic lookback** (to design; **priority-bumped 2026-07-02**): start-of-week moving
+      window + persistently track every unaddressed @ so nothing ages out silently. **Why bumped:**
+      today's noise-filter trace flagged silent 72h aging as one of the two real "missed ping" risks
+      — silently dropping a teammate's @ after 3 days is a trust issue best closed around the R2
+      launch. **Open:** gate R2, or ship as the immediate follow-up? (interacts with the
+      stateless-window design — see Roadmap R8).
 - [ ] **R5 — cc-mention down-ranking**: detect textual `cc @me`, tag + bias low (3rd
       lane alongside @all)
 - [ ] **R7 — Interactive per-item done/snooze**: per-row buttons; `done` drops a ✅
       reaction so it survives without a global list (needs callback spike + R2)
-- [ ] **R8 — Dynamic lookback** (to design): start-of-week moving window; track every
-      unaddressed @ so nothing ages out silently
 - [ ] **R1 — Priority groups** (should-have, opt-in): surface/consider non-@
       messages from groups I designate as relevant
+- [ ] **R9 — Org-signal triage** (low-priority / good-to-have): weight urgency by the
+      sender's org relationship to me — reporting-manager chain + department proximity —
+      so a ping from my manager or my own team ranks above a distant cross-org one
+- [ ] **R10 — Mute-aware triage** (low-priority / good-to-have): honour chat mute/DND as an
+      explicit "I don't care here" signal — drop or hard-downrank @s from muted chats. Gated
+      on a feasibility spike: is per-user mute status even queryable? (unread-badge precedent
+      suggests maybe not)
+- [ ] **R11 — Alert-channel urgency pass** (low-priority / good-to-have, explore-first): rescue
+      genuinely HIGH messages (incidents) from the bot/app-sender drop — real outages often come
+      *from* alert bots, so the blanket drop has a false-negative hole. Needs a relevance filter + cap.
 
 ---
 
@@ -275,11 +312,14 @@ button on **non-thread** messages, but for thread messages Lark emits a **malfor
   cards, alert apps, Slack mirrors) slip through it, so they're dropped here too.
 - Drop `done`/snoozed; drop `deleted`; drop messages with **no meaningful text**
   after stripping placeholders (`[Sticker]`, `[Image: …]`, `[File: …]`, …).
-- Drop known **noise channels** by name *when resolvable* (`unbookable-item-alert-*`,
-  `cross-sell-null-item-alert-*`, `merchandising_oncall`, `release-and-hotfix`,
-  `promo-error-report`, `*| Slack`). Name resolution needs bot capability +
-  `im:chat:readonly`; until then, `--exclude-sender-type bot` + the `app` filter
-  carry it.
+- Drop known **noise channels** by name *when resolvable* — but **only broadcasts** in
+  them; a **direct @me is kept** (`isExcludedChatName && isBroadcast`), since the filter
+  targets @all/automation spam, not people naming me (2026-07-02). Patterns:
+  `unbookable-item-alert-*`, `cross-sell-null-item-alert-*`, `merchandising_oncall`,
+  `release-and-hotfix`, `promo-error-report`. The **`*| Slack` pattern was removed
+  (2026-07-02)** — those are real human coordination channels, not noise; their @all blasts
+  now land in the downranked LOW bucket. Name resolution needs bot capability +
+  `im:chat:readonly`; until then, `--exclude-sender-type bot` + the `app` filter carry it.
 - Dedupe by `message_id`, then **collapse to one row per chat** — the latest
   unread message, mirroring Lark's "@ Mentions" tab. The kept row carries
   `chatUnreadCount` so the card can show "+N more" for that chat.
@@ -414,6 +454,35 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+…) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, so fully reconstructable from `chat_id`+`message_position`) |
 | Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies, so they're watermarked on **`thread_message_position`** (a real per-thread sequence) via the per-thread watermark — **shipped, R4**. Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both — so a message with neither still surfaces once (residual). **Case B (fixed 2026-07-01):** a thread *root* / @mention that starts a thread comes back with a real `message_position` but **no** thread position; it was tested on the chat axis, so an in-thread reply (which only raises the thread watermark) never cleared it. Now: `threadId` + no thread position + real main position ⇒ read once a thread watermark exists for it. **Residual:** if lark-cli's `--sender` search doesn't return one of my in-thread replies, that thread's watermark is absent and its root still surfaces (clearable with `done`/reaction) — to watch |
 | Send **as bot** (`SEND_AS=bot`, the R2 surface) | Can fail `[11205] app do not have bot` **even when the dev console shows Bot enabled + all approved and local creds are valid** (`lark-cli doctor` → `app_resolved` pass, `bot_identity` warn). `auth status` showing bot "ready" is **misleading** — it means the token is *valid*, not that a bot is *provisioned*. Root cause by elimination (2026-06-24): **tenant provisioning** — the app/bot must be *installed / made available in the workspace* (a Lark-admin step), separate from dev-console enable+approve. Not fixable client-side; not a scope, secret, publish, CLI-version, or token-cache issue (all ruled out). Verify with `lark-cli doctor` (`bot_identity: pass`), not `auth status`. **Resolved 2026-06-26** — admin published/provisioned the bot on a **new app** (`cli_aaaba7cf9a211ed1`), so `bot_identity` flipped to `pass`; the user identity was then re-established on the new app via **device-flow login** (`auth login --no-wait` → approve QR → `--device-code`). NB: a new app ⇒ a **new per-app open_id** (auto-detected; don't pin `LARK_USER_OPEN_ID` to the old one) |
+| **Shrink an over-scoped user token via re-auth** | **Can't.** Lark *accumulates* prior consent — re-running `auth login --scope <subset>` while the app still *offers* the broad set returns the **full union**, not the subset (verified 2026-07-02: fresh `grantedAt`, byte-identical `scope` string, `Newly granted: (none)`). To narrow a token you must **remove the scopes at the app/console level** (the app-offered set is the ceiling; a fresh re-auth then mints a narrow token), or revoke the app in Lark's *user* security settings. `lark-cli auth logout` clears only the **local** token; re-login re-accumulates. ⇒ enforce least-privilege at the **app** layer, and verify **after** trimming. |
+| Fire digests back-to-back | Trips `99991400 request trigger frequency limit`. A single digest is a **burst** — `messages-search` ×3 + `chats.get` ×N + `reactions batch_query` — so two overlapping runs (a 2nd `digest` before the 1st returns) double it and hit the cap. Mitigated by the listener **in-flight guard** (2026-07-02); also avoid rapid `npm run listen` restarts (long-connection re-establishment counts toward frequency too). **Transient** — clears after a short cooldown; not a scope/auth issue. |
+
+## Least-privilege scopes (R2 beta) — target set (verify *after* trimming; re-auth can't pre-narrow — see API limits)
+
+The bot's Lark scopes started broad (it doubled as a **Lark MCP endpoint for Claude**).
+inlark's *actual* surface is small — it reads as the **user**, delivers as the **bot**:
+
+| Function | `lark-cli` call | Scope |
+|---|---|---|
+| Scan @mentions + DMs | `im +messages-search` | `search:message` (+ `im:message.{group,p2p}_msg:get_as_user`) |
+| Thread context (R6) | `im +threads-messages-list` | `im:message:readonly` |
+| Read own reactions | `im reactions batch_query` | `im:message.reactions:read` |
+| Resolve group names | `im chats get` | `im:chat:read` |
+| Identity (open_id / name) | `auth status` | `contact:user.base:readonly`, `auth:user.id:read` |
+| **Org-signal triage** (R9, in build) | `contact +user-get` — sender department + reporting-manager (`leader_user_id`) | `contact:department.base:readonly` + the user department/manager field scopes — **exact names TBC against the parallel R9 build before locking** |
+| Deliver digest (if `SEND_AS=user`) | `im +messages-send` | `im:message.send_as_user` |
+| Long-lived token (auto-refresh) | — | `offline_access` (**critical** — no refresh_token without it) |
+
+Everything else once granted — `base:*`, `docx:*`, feed/pins/recall, chat
+member/create/update, `contact:user:search`, reaction **write** — is unused → trim.
+
+**Consent is not automatic.** *Removing* scopes needs no re-consent; *adding* one means
+**every already-onboarded user must re-authorize** (device flow) — token refresh never
+picks up new scopes. → Lock the set **before** onboarding the cohort; a later addition
+(e.g. R7 reaction-**write** for done-via-reaction) = re-touch everyone. **R9's contact
+scopes are folded into this pre-onboarding set for exactly that reason** — it's being built
+in a parallel session, so confirm the final scope names there and reconcile this row before
+we lock the cohort's grant.
 
 ## Non-functional requirements
 
@@ -525,6 +594,9 @@ card to self-chat (`SEND_AS=user`).
   (`SEND_AS=bot`, the R2 surface) uses the same render engine so it should be identical, but
   v2 rendering there is formally unconfirmed — worth a 1-card check when R2 wires bot send.
 - Fallbacks considered + not needed: show-more on the verbatim, or dense one-line rows.
+- **Refinement (2026-07-02):** when LOW/FYI is the *only* bucket it renders expanded/flat, not
+  collapsed — a lone collapsed bucket looked like the empty state. Cap still applies; collapse
+  is unchanged whenever HIGH/MEDIUM are present. See the Shipped tracker entry.
 
 ### R4 — Thread-aware unread, both directions (bug fix) ✅ shipped 2026-06-23
 
@@ -631,7 +703,14 @@ Replace the text-command `done 2 3` flow with **per-row buttons** on the card.
   on the next run — per-item buttons **without** a growing `doneMessageIds` list and
   **without** losing the "never resurfaces" guarantee. Needs a reaction-write scope.
 
-### R8 — Dynamic lookback window (to design, added 2026-06-18)
+### R8 — Dynamic lookback window (to design, added 2026-06-18; **priority-bumped 2026-07-02**)
+
+**Priority bump (2026-07-02):** promoted to the lead item after R2. Today's noise-filter trace
+made the risk concrete — silent 72h aging is one of the two real "missed ping" blind spots (the
+other, bot/app drop, is R11), and shipping a bot to teammates that quietly drops their @s after
+3 days is a trust issue. Open sequencing question: **gate the R2 launch, or ship as the immediate
+follow-up?** Leaning follow-up (R8 is "to design" and non-trivial; 72h is a defensible beta
+default if we flag it as a known limit), but Tessa's call.
 
 The fixed 72h lookback should be a **fallback**, not the curator. Direction Tessa
 wants: a **moving window anchored to the start of the week**, so a week's @s/tasks
@@ -641,6 +720,81 @@ far back a *cold* scan reaches. **To discuss before building** — interacts wit
 stateless-window design (today a run reads nothing and re-derives the backlog) and
 with how items leave (reply/react/done). Quick phrasing fix shipped first
 (2026-06-18): the lookback label is now date-only.
+
+### R9 — Org-signal triage: department + reporting-manager (low-priority / good-to-have, added 2026-07-02)
+
+Use the sender's **position in the org chart** as a triage signal, on top of the
+existing urgency/category model. Intuition: a ping from my **reporting-manager chain**
+(my manager, my skip, my directs) or from my **own team/department** usually deserves to
+rank above an otherwise-identical message from a distant part of the org; "department
+statistics" (how close the sender's department sits to mine) is a cheap relevance proxy
+when the text alone is ambiguous.
+
+- **How it'd compose:** a **bias input** to classification (like `is_broadcast`), not a
+  hard reorder — nudges urgency, never overrides a genuine `high`. Likely a per-sender
+  `org_relationship` feature (manager-chain? same team? same department? cross-org?) fed
+  into the prompt + a card tag.
+- **Data source / scope (folded into the pre-onboarding grant):** sender department +
+  manager come from the Lark contact/org directory (`lark-contact`); reading them needs
+  **contact scopes beyond today's identity-only `contact:user.base:readonly`** (department +
+  manager fields). Because *adding* a scope forces **every already-onboarded user to
+  re-authorize** (R2 scope note), these are now listed in the **least-privilege scope table
+  above** so they're granted *before* the cohort — no re-auth wave. **Being built in a
+  parallel session (2026-07-02):** confirm the final scope names there and reconcile the
+  table row before we lock the grant. The org graph is near-static → cache the lookup hard.
+- **Sensitivity:** this reads employee org data (reporting lines, department membership) —
+  keep it strictly need-to-know, use it only to rank *my own* inbox, and don't surface
+  anyone's manager/department on the card beyond what triage needs.
+- **Open questions:** where the org signal ranks vs. @all / cc down-ranking; whether
+  "department proximity" earns its keep beyond the manager-chain (the strongest signal on
+  its own); how it composes with priority groups (R1, which is the other "relevance beyond
+  a direct @" lever).
+
+### R10 — Mute-aware triage (low-priority / good-to-have, added 2026-07-02)
+
+Chat **mute/DND is the strongest explicit signal Tessa gives** — "I've decided I don't care
+about pings here." inlark ignores it today; she compensates manually by dismissing @all from
+muted chats. Honouring it (drop, or hard-downrank, @s from muted chats) would automate that
+and generalise better than the hardcoded noise-name list (`isExcludedChatName`,
+[config.js](src/config.js)), which only fires when a chat name resolves.
+
+- **Feasibility spike FIRST (gates everything below):** is per-user chat mute status even
+  queryable? Mute is a client-side notification preference — same family as the unread badge
+  the [limitations table](SPEC.md#L398) records as **not exposed via API**. It's *not* on the
+  `messages-search` payload, so at best it needs a separate per-chat settings lookup with an
+  unproven scope, and it may not exist at all. Don't design further until this is answered.
+- **If queryable — design questions:** **downrank vs. drop** — a muted chat can still carry a
+  real direct @me that matters, so a blanket drop risks a false negative; hard-downrank is
+  probably the safer default (drop only for @all-in-muted). How it composes with the existing
+  @all / cc down-rank. Mute is *my* preference ⇒ **per-user by construction**, so it fits the
+  R2 multi-user model (per-user lookup + cache the near-static result). Any new scope ⇒
+  re-consent — fold into the pre-onboarding grant (like R9) if it lands before the cohort.
+- **Why low-prio:** the bot/app sender drop + noise-name list + @all collapse already dark
+  most of these chats; this closes the residual (a human @all / @me in a muted human channel)
+  and swaps a brittle hardcoded list for an explicit user signal.
+
+### R11 — Alert-channel urgency pass (low-priority / good-to-have, explore-first, added 2026-07-02)
+
+**The inverse risk of a deliberate decision.** Automated senders are dropped hard today —
+`--exclude-sender-type bot` at fetch **plus** the `{bot, app}` drop
+([fetchMentions.js:426](src/fetchMentions.js#L426)) and the noise-name list (`isExcludedChatName`,
+[config.js:105-110](src/config.js#L105-L110)) — all built to kill release/alert spam. But the
+canonical **HIGH** case (incident / outage / paging) very often arrives *from* a bot or app in an
+alert channel, so the blanket drop has a **false-negative hole exactly where urgency matters most**.
+
+The tension is **volume** — those channels are firehoses (that's *why* they're dropped), so the fix
+can't be "stop dropping them"; it needs a relevance gate + cap or it reintroduces the noise we
+removed. Approaches to weigh (not decided):
+- **(a) Critical-channel allowlist** — the inverse of the noise list; named alert channels bypass
+  the bot/app drop, then AI classifies and we surface **only HIGH**.
+- **(b) Severity keyword pass** — scan otherwise-dropped automated messages for
+  `SEV1`/`P1`/`outage`/`down`/`paging` and rescue just those.
+- **(c) Classifier-decides** — let the `incident` category do the work, with a hard cap so a noisy
+  night can't flood the digest.
+- **Composes with:** R1 (priority groups — the other "relevance beyond a direct @" lever) and R10
+  (mute — a muted alert channel is a strong "don't rescue" signal).
+
+**Consider before build** (Tessa, 2026-07-02) — needs design, not just a flag.
 
 ---
 

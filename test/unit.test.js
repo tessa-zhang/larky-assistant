@@ -33,7 +33,7 @@ test('formatDate renders the date without a time component', () => {
 test('isExcludedChatName matches noise patterns only', () => {
   assert.equal(isExcludedChatName('unbookable-item-alert-sg'), true);
   assert.equal(isExcludedChatName('merchandising_oncall'), true);
-  assert.equal(isExcludedChatName('Some Channel | Slack'), true);
+  assert.equal(isExcludedChatName('Some Channel | Slack'), false); // Slack-mirror pattern removed 2026-07-02 (real coordination groups)
   assert.equal(isExcludedChatName('TA Demand Engineering'), false);
   assert.equal(isExcludedChatName(null), false);
 });
@@ -308,6 +308,22 @@ test('buildDigestCard (R3) collapses ONLY low/FYI behind a panel; high/medium st
   assert.ok(flat.includes('prod down'));   // high summary rendered expanded
   assert.ok(flat.includes('review my PRD')); // medium summary rendered expanded
   assert.ok(!flat.includes('fyi note'));     // low summary is NOT at the top level
+});
+
+test('buildDigestCard expands LOW/FYI when it is the only bucket (cap still applies)', () => {
+  const lowCount = config.lowDisplayLimit + 3;
+  const items = Array.from({ length: lowCount }, (_, i) => ({
+    n: i + 1, urgency: 'low', category: 'fyi', summary: `chatter ${i}`, isDM: true, chatName: 'Bob', senderName: 'Bob', text: `note ${i}`, chatUnreadCount: 1, link: null, createTime: NOW,
+  }));
+  const top = buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements;
+
+  // No collapse when LOW is the sole bucket — a collapsed lone bucket reads as empty.
+  assert.equal(top.filter((e) => e.tag === 'collapsible_panel').length, 0);
+
+  const text = JSON.stringify(top);
+  assert.ok(text.includes('LOW / FYI'));      // section title still rendered, flat
+  assert.ok(text.includes('chatter 0'));      // low items rendered at top level, expanded
+  assert.ok(text.includes('more low/FYI'));   // LOW_DISPLAY_LIMIT cap still guards overflow
 });
 
 test('buildDigestCard marks thread rows with a 🧵 and the thread topic', () => {

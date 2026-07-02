@@ -75,12 +75,11 @@ function sectionTitle(meta, count) {
 }
 
 /**
- * The LOW/FYI bucket as a collapsed `collapsible_panel` (R3). The header still
- * carries the count so you see how many low items exist without expanding; the
- * items (capped + "+N more" line) live inside, revealed on demand. HIGH/MEDIUM
- * are never collapsed — they're rendered flat by the caller.
+ * The capped LOW/FYI item blocks + a "+N more" overflow line. Shared by the
+ * collapsed panel and the expanded (only-bucket) render: the LOW_DISPLAY_LIMIT
+ * cap is an overflow guard independent of the collapse, so it applies either way.
  */
-function lowPanel(bucket, now) {
+function lowItems(bucket, now) {
   const shown = bucket.slice(0, config.lowDisplayLimit);
   const inner = [];
   for (const it of shown) inner.push(...itemBlock(it, now));
@@ -88,6 +87,16 @@ function lowPanel(bucket, now) {
     // (schema 2.0 dropped the `note` element — render the overflow line as markdown.)
     inner.push({ tag: 'markdown', content: `…+${bucket.length - shown.length} more low/FYI (use \`done\` to clear)` });
   }
+  return inner;
+}
+
+/**
+ * The LOW/FYI bucket as a collapsed `collapsible_panel` (R3). The header still
+ * carries the count so you see how many low items exist without expanding; the
+ * items (capped + "+N more" line) live inside, revealed on demand. HIGH/MEDIUM
+ * are never collapsed — they're rendered flat by the caller.
+ */
+function lowPanel(bucket, now) {
   return {
     tag: 'collapsible_panel',
     expanded: false,
@@ -98,7 +107,7 @@ function lowPanel(bucket, now) {
       icon_position: 'right',
       icon_expanded_angle: -180,
     },
-    elements: inner,
+    elements: lowItems(bucket, now),
   };
 }
 
@@ -106,7 +115,9 @@ function lowPanel(bucket, now) {
  * Build a Lark interactive card (schema 2.0) from numbered, classified items.
  * `items` must each carry: n, urgency, category, summary, chatName, isDM,
  * createTime, link. HIGH + MEDIUM render expanded; LOW/FYI is collapsed behind a
- * `collapsible_panel` so a busy digest stays scannable (R3).
+ * `collapsible_panel` so a busy digest stays scannable (R3) — unless LOW is the
+ * *only* bucket, in which case it renders expanded (nothing above it to bury), the
+ * LOW_DISPLAY_LIMIT cap still applying as an overflow guard.
  */
 export function buildDigestCard({ items, since, generatedAt = new Date(), footerHint }) {
   const now = generatedAt;
@@ -125,8 +136,15 @@ export function buildDigestCard({ items, since, generatedAt = new Date(), footer
     const meta = URGENCY_META[key];
     elements.push({ tag: 'hr' });
     if (key === 'low') {
-      // Collapsed by default — keeps low/FYI noise out of the way until expanded.
-      elements.push(lowPanel(bucket, now));
+      // Collapsed by default so LOW/FYI doesn't bury HIGH/MEDIUM. But when LOW is
+      // the *only* bucket there's nothing above it to protect, and a collapsed sole
+      // bucket reads like the empty state — so render it expanded (still capped).
+      if (groups.high.length === 0 && groups.medium.length === 0) {
+        elements.push({ tag: 'markdown', content: sectionTitle(meta, bucket.length) });
+        elements.push(...lowItems(bucket, now));
+      } else {
+        elements.push(lowPanel(bucket, now));
+      }
     } else {
       elements.push({ tag: 'markdown', content: sectionTitle(meta, bucket.length) });
       for (const it of bucket) elements.push(...itemBlock(it, now));

@@ -81,6 +81,7 @@ async function cmdListen(self) {
   });
 
   const seen = new Set();
+  let digestRunning = false; // in-flight guard for the heavy digest pipeline (single-user; R2 keys per user)
   const rl = readline.createInterface({ input: child.stdout });
   rl.on('line', async (line) => {
     if (!line.trim().startsWith('{')) return;
@@ -107,7 +108,17 @@ async function cmdListen(self) {
 
     try {
       if (/^digest$/i.test(cmd)) {
-        await runDigest({ self, delivery, footerHint: BOT_FOOTER, ack: true });
+        // A digest is a burst of Lark calls (watermark + mention + DM searches, then
+        // chat-name + reaction lookups). A second `digest` fired before the first returns
+        // doubles that burst and trips Lark's rate limit (99991400). Ignore overlapping
+        // triggers — the first run's "⏳ Fetching…" ack already signals it's working.
+        if (digestRunning) { console.error('digest already running — ignoring duplicate trigger'); return; }
+        digestRunning = true;
+        try {
+          await runDigest({ self, delivery, footerHint: BOT_FOOTER, ack: true });
+        } finally {
+          digestRunning = false;
+        }
       } else if (/^done\b/i.test(cmd)) {
         await runDone({ delivery, footerHint: BOT_FOOTER, numbers: parseNumbers([cmd.replace(/^done/i, '')]) });
       } else if (/^snooze\b/i.test(cmd)) {

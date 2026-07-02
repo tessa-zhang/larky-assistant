@@ -445,9 +445,11 @@ export async function fetchSince(startISO, self, state) {
     it.chatName = it.isDM ? it.senderName : nameByChat.get(it.chatId) || null;
   }
 
-  // Apply name-based noise exclusion where a name is available.
+  // Name-based noise exclusion — but ONLY for broadcasts. A direct @me is a personal
+  // ping worth surfacing even in a "noise" channel; the filter is for @all/automation
+  // spam, not people naming me. (Dropping direct @s here was hiding real asks — 2026-07-02.)
   items = items.filter((it) => {
-    if (isExcludedChatName(it.chatName)) { skipped.excludedChat++; return false; }
+    if (isExcludedChatName(it.chatName) && it.isBroadcast) { skipped.excludedChat++; return false; }
     return true;
   });
 
