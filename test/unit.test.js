@@ -1,13 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { relativeTime, formatDateTime, formatDate, MS_PER_HOUR } from '../src/time.js';
 import { isExcludedChatName, config } from '../src/config.js';
-import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, jumpLink, parsePosition, threadCacheKey } from '../src/fetchMentions.js';
+import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, passesSenderFilter, jumpLink, parsePosition, threadCacheKey } from '../src/fetchMentions.js';
 import { reactedIdsFromDetails } from '../src/lark.js';
-import { extractJson } from '../src/classify.js';
+import { extractJson, systemPrompt } from '../src/classify.js';
 import { buildDigestCard, previewText } from '../src/buildCard.js';
-import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, getCachedSummary, setCachedSummary, pruneSummaryCache } from '../src/state.js';
+import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, getCachedSummary, setCachedSummary, pruneSummaryCache, load, save } from '../src/state.js';
 
 const NOW = new Date('2026-06-16T12:00:00Z');
 
@@ -128,6 +131,19 @@ test('mentionsUser detects a direct @me but not an @all broadcast', () => {
   assert.equal(mentionsUser(undefined, me), false);
 });
 
+test('passesSenderFilter keeps humans + direct-@me bots, drops bot broadcasts & bot DMs', () => {
+  // Human sender always passes, regardless of DM/broadcast.
+  assert.equal(passesSenderFilter({ senderType: 'user', isDM: false, isBroadcast: false }), true);
+  assert.equal(passesSenderFilter({ senderType: null, isDM: true, isBroadcast: false }), true);
+  // Bot/app that @mentions me directly in a group (isBroadcast false) → rescued.
+  assert.equal(passesSenderFilter({ senderType: 'app', isDM: false, isBroadcast: false }), true);
+  assert.equal(passesSenderFilter({ senderType: 'bot', isDM: false, isBroadcast: false }), true);
+  // Bot/app broadcast (@all, my id absent) → still dropped.
+  assert.equal(passesSenderFilter({ senderType: 'app', isDM: false, isBroadcast: true }), false);
+  // Bot/app DM (a notification, not a person) → still dropped (no mentions[] axis).
+  assert.equal(passesSenderFilter({ senderType: 'app', isDM: true, isBroadcast: false }), false);
+});
+
 test('reactedIdsFromDetails returns only messages I reacted to', () => {
   const details = [
     { message_id: 'om_1', message_reaction_items: [{ operator: { operator_id: 'ou_me' } }] },
@@ -196,6 +212,24 @@ test('groupRows: one row per DM / per thread / per chat-main, latest is rep, cou
   assert.equal(byId.get('b1').bundleType, 'single');   // @all never bundled
 });
 
+test('groupRows: mentionCount + mentions count only direct @you (not @all / DMs), oldest→newest', () => {
+  const t = (h) => new Date(`2026-06-16T${h}:00:00Z`);
+  const items = [
+    // one thread, two direct @me messages from different people (out of order)
+    { isDM: false, isBroadcast: false, threadId: 'omt_1', chatId: 'oc_g', messageId: 't2', position: null, createTime: t('11'), senderName: 'Gerald', text: 'confirm departure port?', link: 'https://j2' },
+    { isDM: false, isBroadcast: false, threadId: 'omt_1', chatId: 'oc_g', messageId: 't1', position: null, createTime: t('08'), senderName: 'Muda', text: 'handle missing route info?', link: 'https://j1' },
+    { isDM: false, isBroadcast: true, chatId: 'oc_ann', messageId: 'b1', position: 3, createTime: t('05'), senderName: 'Carol', text: 'hi @all', link: null },
+    { isDM: true, chatId: 'oc_dm', messageId: 'd1', position: 1, createTime: t('09'), senderName: 'Bob', text: 'ping', link: null },
+  ];
+  const byId = new Map(groupRows(items).map((r) => [r.messageId, r]));
+  const thread = byId.get('t2'); // t2 is latest ⇒ the rep
+  assert.equal(thread.mentionCount, 2);
+  assert.deepEqual(thread.mentions.map((m) => m.sender), ['Muda', 'Gerald']); // chronological
+  assert.deepEqual(thread.mentions.map((m) => m.link), ['https://j1', 'https://j2']);
+  assert.equal(byId.get('b1').mentionCount, 0); // @all broadcast is not a direct @you
+  assert.equal(byId.get('d1').mentionCount, 0); // a DM is not an @
+});
+
 test('dmBundle takes the unread run oldest→newest, recency-caps, clips, marks not-me', () => {
   const t = (h) => new Date(`2026-06-16T${h}:00:00Z`);
   const members = [
@@ -245,6 +279,14 @@ test('extractJson handles bare, fenced, and prefaced arrays; throws otherwise', 
   assert.throws(() => extractJson('no array here'));
 });
 
+test('systemPrompt is name-aware and encodes actor-relative urgency (named ≠ asked)', () => {
+  const p = systemPrompt('Tessa Zhang');
+  assert.ok(p.includes('Tessa Zhang'));            // the user's name is woven in
+  assert.ok(/named/i.test(p) && /asked/i.test(p)); // the "named ≠ asked" crux rule
+  assert.ok(/routing/i.test(p));                   // routing/FYI notes are down-ranked
+  assert.ok(systemPrompt().includes('the user'));  // graceful fallback without a name
+});
+
 test('snooze hides items, then clearExpiredSnoozes releases the expired ones', () => {
   const state = { doneMessageIds: [], snoozedMessages: [] };
   snooze(state, ['om_1'], 24, NOW);
@@ -263,12 +305,36 @@ test('markDone records ids and un-snoozes them', () => {
   assert.equal(state.snoozedMessages.length, 0); // done item no longer snoozed
 });
 
-test('buildDigestCard groups by urgency and caps the LOW bucket', () => {
-  const lowCount = config.lowDisplayLimit + 2;
+test('load/save isolate state per user — one user\'s done/digest never touches another\'s', async () => {
+  const saved = process.env.STATE_DIR;
+  const dir = join(tmpdir(), 'inlark-state-test');
+  await rm(dir, { recursive: true, force: true }); // clean slate
+  process.env.STATE_DIR = dir;                     // stateDir() is lazy → override applies
+  try {
+    await save('ou_A', { doneMessageIds: ['om_a'], lastDigest: { items: [{ n: 1, messageId: 'om_a' }] } });
+    await save('ou_B', { doneMessageIds: ['om_b'], lastDigest: { items: [{ n: 1, messageId: 'om_b' }] } });
+
+    const a = await load('ou_A');
+    const b = await load('ou_B');
+    assert.deepEqual(a.doneMessageIds, ['om_a']);            // A sees only A
+    assert.deepEqual(b.doneMessageIds, ['om_b']);            // B sees only B
+    assert.equal(a.lastDigest.items[0].messageId, 'om_a');   // `done`/`done all` resolve against
+    assert.equal(b.lastDigest.items[0].messageId, 'om_b');   // each user's OWN snapshot
+
+    const c = await load('ou_C');                            // a brand-new user starts empty,
+    assert.deepEqual(c.doneMessageIds, []);                  // not from someone else's state
+    assert.equal(c.lastDigest, null);
+  } finally {
+    if (saved === undefined) delete process.env.STATE_DIR; else process.env.STATE_DIR = saved;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('buildDigestCard lists ALL low items (no cap) collapsed behind the panel', () => {
   const items = [
     { n: 1, urgency: 'high', category: 'incident', summary: 'prod down', isDM: false, chatName: 'ops', senderName: 'Alice', text: 'checkout is throwing 500s', chatUnreadCount: 3, link: 'https://x', createTime: NOW },
     { n: 2, urgency: 'low', category: 'fyi', summary: 'all-hands reminder', isDM: false, isBroadcast: true, chatName: 'announcements', senderName: 'Carol', text: 'Hi @all standup moved', chatUnreadCount: 1, link: null, createTime: NOW },
-    ...Array.from({ length: lowCount }, (_, i) => ({
+    ...Array.from({ length: 15 }, (_, i) => ({
       n: i + 3, urgency: 'low', category: 'fyi', summary: `chatter ${i}`, isDM: true, chatName: 'Bob', senderName: 'Bob', text: `note ${i}`, chatUnreadCount: 1, link: null, createTime: NOW,
     })),
   ];
@@ -280,11 +346,15 @@ test('buildDigestCard groups by urgency and caps the LOW bucket', () => {
   const text = JSON.stringify(card.body.elements);
   assert.ok(text.includes('HIGH PRIORITY'));
   assert.ok(text.includes('LOW / FYI'));
-  assert.ok(text.includes('more low/FYI'));   // low bucket: only lowDisplayLimit shown, rest summarised
+  assert.ok(!text.includes('more low/FYI'));  // NO cap by default — every low item is listed…
+  assert.ok(text.includes('chatter 14'));     // …including the last one
   assert.ok(text.includes('checkout is throwing 500s')); // verbatim message excerpt rendered
-  assert.ok(text.includes('Alice'));          // group sender prefixed on the excerpt
   assert.ok(text.includes('📣 @all'));         // broadcast tag rendered on the @all item
   assert.ok(text.includes('hint'));           // footer
+  // LOW still collapses (HIGH present) — its items live INSIDE the panel, all of them.
+  const panel = card.body.elements.find((e) => e.tag === 'collapsible_panel' && /LOW \/ FYI/.test(JSON.stringify(e.header)));
+  assert.ok(panel);
+  assert.ok(JSON.stringify(panel.elements).includes('chatter 14'));
 });
 
 test('buildDigestCard (R3) collapses ONLY low/FYI behind a panel; high/medium stay flat', () => {
@@ -310,8 +380,8 @@ test('buildDigestCard (R3) collapses ONLY low/FYI behind a panel; high/medium st
   assert.ok(!flat.includes('fyi note'));     // low summary is NOT at the top level
 });
 
-test('buildDigestCard expands LOW/FYI when it is the only bucket (cap still applies)', () => {
-  const lowCount = config.lowDisplayLimit + 3;
+test('buildDigestCard renders a sole LOW bucket flat + complete (no collapse, no cap)', () => {
+  const lowCount = 15;
   const items = Array.from({ length: lowCount }, (_, i) => ({
     n: i + 1, urgency: 'low', category: 'fyi', summary: `chatter ${i}`, isDM: true, chatName: 'Bob', senderName: 'Bob', text: `note ${i}`, chatUnreadCount: 1, link: null, createTime: NOW,
   }));
@@ -322,8 +392,8 @@ test('buildDigestCard expands LOW/FYI when it is the only bucket (cap still appl
 
   const text = JSON.stringify(top);
   assert.ok(text.includes('LOW / FYI'));      // section title still rendered, flat
-  assert.ok(text.includes('chatter 0'));      // low items rendered at top level, expanded
-  assert.ok(text.includes('more low/FYI'));   // LOW_DISPLAY_LIMIT cap still guards overflow
+  assert.ok(text.includes('chatter 0') && text.includes('chatter 14')); // EVERY item shown, no cap
+  assert.ok(!text.includes('more low/FYI'));  // no cap by default
 });
 
 test('buildDigestCard marks thread rows with a 🧵 and the thread topic', () => {
@@ -334,6 +404,36 @@ test('buildDigestCard marks thread rows with a 🧵 and the thread topic', () =>
   assert.ok(text.includes('🧵'));                 // thread marker
   assert.ok(text.includes('staged rollout plan')); // topic disambiguates threads in the same chat
   assert.ok(text.includes('+3 more'));            // chatUnreadCount 4 → +3 more
+});
+
+test('buildDigestCard: multi-@ bundle gets a "N @you" badge + per-@ expander (top level only, no nesting)', () => {
+  const mentions = [
+    { sender: 'Muda', text: 'handle missing route info?', link: 'https://j1' },
+    { sender: 'Gerald', text: 'confirm departure port?', link: 'https://j2' },
+  ];
+  const items = [
+    // HIGH multi-@ → rendered flat ⇒ expander present
+    { n: 1, urgency: 'high', category: 'question', summary: 'cruise config asks', isDM: false, bundleType: 'thread', threadTopic: 'age config', chatName: 'Cruise', senderName: 'Gerald', text: 'confirm departure port?', chatUnreadCount: 5, mentionCount: 2, mentions, link: 'https://j2', createTime: NOW },
+    // LOW multi-@ → lives inside the LOW/FYI panel ⇒ NO nested expander
+    { n: 2, urgency: 'low', category: 'fyi', summary: 'low thread', isDM: false, bundleType: 'thread', chatName: 'chatty', senderName: 'X', text: 'fyi', chatUnreadCount: 3, mentionCount: 2, mentions, link: 'https://j3', createTime: NOW },
+  ];
+  const top = buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements;
+
+  // Badge on the HIGH row (flat/top level), and its "+N more" is suppressed for it.
+  const flat = JSON.stringify(top.filter((e) => e.tag !== 'collapsible_panel'));
+  assert.ok(flat.includes('2 @you'));
+  assert.ok(!flat.includes('+4 more')); // @you badge replaces the generic total-unread count
+
+  // Exactly one per-@ expander, at top level, listing each @'s sender + excerpt.
+  const expanders = top.filter((e) => e.tag === 'collapsible_panel' && /unreplied @s to you/.test(JSON.stringify(e.header)));
+  assert.equal(expanders.length, 1);
+  const ex = JSON.stringify(expanders[0]);
+  assert.ok(ex.includes('handle missing route info?') && ex.includes('confirm departure port?'));
+
+  // The LOW/FYI panel must NOT contain a nested collapsible (no nested expanders).
+  const low = top.find((e) => e.tag === 'collapsible_panel' && /LOW \/ FYI/.test(JSON.stringify(e.header)));
+  assert.ok(low);
+  assert.ok(!JSON.stringify(low.elements).includes('collapsible_panel'));
 });
 
 // --- R2 token guard: per-thread summary cache --------------------------------
@@ -350,9 +450,9 @@ test('threadCacheKey returns null (uncacheable) without a thread id or newest po
   assert.equal(threadCacheKey(null, 5, 1), null);
   assert.equal(threadCacheKey('omt_1', null, 1), null);
   // A never-replied thread (no watermark) is still cacheable — key encodes "none".
-  assert.equal(threadCacheKey('omt_1', 5, null), 'omt_1|5|none');
+  assert.equal(threadCacheKey('omt_1', 5, null), 'v2|omt_1|5|none');
   // Position 0 is a REAL newest position (0-indexed), not "missing" — must cache.
-  assert.equal(threadCacheKey('omt_1', 0, 0), 'omt_1|0|0');
+  assert.equal(threadCacheKey('omt_1', 0, 0), 'v2|omt_1|0|0');
 });
 
 test('summary cache stores and reuses a classification, refreshing recency on hit', () => {

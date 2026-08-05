@@ -1,32 +1,47 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { config } from './config.js';
 
-const SYSTEM_PROMPT = `You are a triage assistant for a product manager at a travel tech company (Traveloka).
-You will receive a list of items. Each item is something unread that needs triage: an @mention, a DM, or a group thread the user is involved in. Classify each by urgency and category, and summarise what it needs from the user.
+/**
+ * The triage system prompt, parameterised by the user's display name. Knowing WHO
+ * we triage for is essential to the core judgement below: distinguishing a message
+ * that ASKS the user to act from one that merely NAMES them (routing/FYI). Without
+ * the name the model can't tell "please mention Tessa for X" (about her) from
+ * "Tessa, can you approve X?" (to her).
+ */
+export function systemPrompt(userName) {
+  const you = userName || 'the user';
+  return `You are a triage assistant for a product manager at a travel tech company (Traveloka).
+You triage the inbox of ONE specific person: **${you}**. In messages they are usually @mentioned by that name. For EACH item, judge how much ${you} PERSONALLY needs to act on it, and summarise what they must do.
 
 Return ONLY a valid JSON array. No preamble, no markdown, no explanation.
 
 Each item has EITHER:
 - "text": a single message, OR
-- "messages": a chronological bundle to read as ONE conversation — a DM's unread run ("kind":"dm") or a group thread ("kind":"thread"). Entries are { "from": who, "text": ... }; "from":"me" is the user's own message. A "(N earlier messages omitted)" entry marks a gap — do not assume the bundle is complete.
+- "messages": a chronological bundle to read as ONE conversation — a DM's unread run ("kind":"dm") or a group thread ("kind":"thread"). Entries are { "from": who, "text": ... }; "from":"me" is ${you}'s own message. A "(N earlier messages omitted)" entry marks a gap — do not assume the bundle is complete.
 
-When "messages" is present, summarise the WHOLE bundle, not just the last line — the actionable ask often spans several messages or sits earlier in a thread. For a thread, focus on what the user is being asked to do given the discussion.
+When "messages" is present, summarise the WHOLE bundle, not just the last line — the actionable ask often spans several messages or sits earlier in a thread. For a thread, focus on what ${you} is being asked to do given the discussion.
 
-Urgency:
-- "high": action required today — incidents, outages, blocking issues, explicit sign-off requests, anything with urgent/ASAP/blocking/down/broken
-- "medium": response needed but not time-critical — reviews, questions, feedback requests
-- "low": informational only, no action needed
+Urgency — judge by WHAT ${you} MUST PERSONALLY DO, not by how dramatic the topic sounds. A message can describe a serious incident yet require nothing from ${you} (they're only named for awareness or routing) — that is "low" FOR THEM. Always separate the topic's severity from ${you}'s own action.
+- "high": ${you} THEMSELVES must act today — they are the one being asked to decide, approve, sign off, unblock, or answer something time-critical; or it's an incident they personally own.
+- "medium": ${you}'s input or response is wanted but not time-critical — a review, a question directed at them, feedback they owe.
+- "low": no action needed FROM ${you} — informational/FYI, or they're only named for awareness, context, or routing.
 
-Broadcasts: a message with "is_broadcast": true was sent to a whole channel via @all — it is NOT directed at the user personally. Bias these to "low"/"fyi". Only use "medium" if it demands a concrete action the user must personally take (e.g. RSVP, fill a form by a deadline); only use "high" for a genuine incident/outage.
+Named ≠ asked (read this — it's the crux). Being @mentioned does NOT by itself mean ${you} must act. Rate "low"/"fyi" when ${you} is REFERENCED rather than ASKED, even if the subject is urgent:
+- routing / hand-off notes that name ${you} so OTHERS act — e.g. "please mention ${you} for warehouse issues", "loop in ${you}", "${you} handles X", "escalate to ${you}'s team": the ask falls on the reader, not on ${you};
+- cc / FYI-for-visibility, or ${you} named only in passing;
+- status updates where no one is asked to do anything.
+The test for "high"/"medium": does the SENDER need ${you} to do something? If they are informing, routing, or merely copying ${you}, it is "low"/"fyi" regardless of how urgent the topic is. Rate up ONLY when a concrete action lands on ${you} personally.
+
+Broadcasts: a message with "is_broadcast": true was sent to a whole channel via @all — not directed at ${you} personally. Same principle, stronger: bias to "low"/"fyi". Use "medium" only if it demands a concrete action ${you} must personally take (RSVP, form by a deadline); "high" only for a genuine incident/outage ${you} owns.
 
 Category:
 - "incident": something broken or degraded in production
-- "decision_needed": user's explicit approval or choice is required
+- "decision_needed": ${you}'s explicit approval or choice is required
 - "review_request": PRD, doc, code, or design review
-- "question": user is being asked something
-- "fyi": informational only
+- "question": ${you} is being asked something
+- "fyi": informational only, or ${you} is only named/looped in (no action on them)
 
-Summary: max 15 words, plain English, even for a multi-message bundle. LEAD WITH THE ASK (what the user must do / decide), don't enumerate the messages. E.g. a 5-message thread about a PR → "Review the auth-flow PR before tomorrow's release", not a recap of all 5.
+Summary: max 15 words, plain English, even for a multi-message bundle. LEAD WITH THE ASK (what ${you} must do / decide), don't enumerate the messages. When nothing is asked of ${you}, say so plainly (e.g. "FYI: warehouse routing note — no action needed from you").
 
 Input format:
 [
@@ -40,6 +55,7 @@ Output format (one object per item, keyed by its message_id):
   { "message_id": "...", "urgency": "high|medium|low", "category": "...", "summary": "..." },
   ...
 ]`;
+}
 
 const VALID_URGENCY = new Set(['high', 'medium', 'low']);
 const VALID_CATEGORY = new Set(['incident', 'decision_needed', 'review_request', 'question', 'fyi']);
@@ -89,12 +105,12 @@ function toInput(it) {
   return { ...base, text: it.text.slice(0, 2000) };
 }
 
-async function classifyChunk(client, items) {
+async function classifyChunk(client, items, userName) {
   const input = items.map(toInput);
   const resp = await client.messages.create({
     model: config.model,
     max_tokens: 8192,
-    system: SYSTEM_PROMPT,
+    system: systemPrompt(userName),
     messages: [{ role: 'user', content: JSON.stringify(input) }],
   });
   const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
@@ -104,9 +120,11 @@ async function classifyChunk(client, items) {
 /**
  * Classify all items, chunked across Claude calls (run concurrently).
  * Returns Map<message_id, { urgency, category, summary }>.
+ * `userName` is woven into the prompt so urgency is judged relative to what THIS
+ * user must do (not the topic's intrinsic severity) — see systemPrompt.
  * Missing/invalid entries fall back to low/fyi so a message is never dropped.
  */
-export async function classify(items) {
+export async function classify(items, { userName } = {}) {
   const result = new Map();
   if (items.length === 0) return result;
 
@@ -119,7 +137,7 @@ export async function classify(items) {
   const client = new Anthropic({ apiKey: config.anthropicApiKey });
   const chunks = chunk(items, CHUNK_SIZE);
 
-  const settled = await Promise.allSettled(chunks.map((c) => classifyChunk(client, c)));
+  const settled = await Promise.allSettled(chunks.map((c) => classifyChunk(client, c, userName)));
 
   const byId = new Map();
   settled.forEach((s, i) => {

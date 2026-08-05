@@ -48,7 +48,7 @@ function startWindow() {
  * the delivered items so done/snooze can act without re-fetching.
  */
 export async function runDigest({ self, delivery, footerHint, ack = false }) {
-  const state = store.clearExpiredSnoozes(await store.load());
+  const state = store.clearExpiredSnoozes(await store.load(self.openId));
   const since = startWindow();
   const sinceDate = new Date(since); // fixed lookback window start
   const runAt = new Date();
@@ -61,7 +61,7 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
     await deliver(delivery, `✅ You're all caught up! No new unread mentions or DMs since ${formatDate(sinceDate)}.`);
     state.lastRunAt = runAt.toISOString();
     state.lastDigest = { generatedAt: runAt.toISOString(), since, items: [] };
-    await store.save(state);
+    await store.save(self.openId, state);
     return { count: 0, skipped };
   }
 
@@ -80,7 +80,7 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
     else toClassify.push(it);
   }
 
-  const classified = await classify(toClassify);
+  const classified = await classify(toClassify, { userName: self.userName });
   for (const it of toClassify) {
     const c = classified.get(it.messageId);
     Object.assign(it, c);
@@ -96,7 +96,7 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
   for (const it of items) { delete it.bundle; delete it.cacheKey; }
   state.lastRunAt = runAt.toISOString();
   state.lastDigest = { generatedAt: runAt.toISOString(), since, items };
-  await store.save(state);
+  await store.save(self.openId, state);
   return { count: items.length, cached: cachedCount, skipped };
 }
 
@@ -115,12 +115,12 @@ function resolveNumbers(state, numbers) {
 }
 
 /** Re-render the remaining (non-hidden) items as a fresh card and persist. */
-async function rerender(state, delivery, footerHint) {
+async function rerender(userId, state, delivery, footerHint) {
   const hidden = store.hiddenMessageIds(state);
   let remaining = rehydrate(state.lastDigest?.items || []).filter((it) => !hidden.has(it.messageId));
   numberItems(remaining);
   state.lastDigest = { ...state.lastDigest, items: remaining };
-  await store.save(state);
+  await store.save(userId, state);
   if (remaining.length === 0) {
     await deliver(delivery, '✅ All clear — nothing left in this digest.');
     return;
@@ -141,32 +141,42 @@ const noMatchMessage = (numbers) =>
  * Shared done/snooze flow: resolve card numbers → apply `mutate` → confirm →
  * re-render the survivors. `confirm(refs)` builds the action-specific message.
  */
-async function applyToMatched({ delivery, footerHint, numbers, mutate, confirm }) {
-  const state = store.clearExpiredSnoozes(await store.load());
-  const { matched, invalid } = resolveNumbers(state, numbers);
+async function applyToMatched({ userId, delivery, footerHint, numbers, all, mutate, confirm }) {
+  const state = store.clearExpiredSnoozes(await store.load(userId));
+  let matched;
+  let invalid = [];
+  if (all) {
+    // `all` clears every item in the last delivered digest. Safe by construction: the
+    // card lists every item (no display cap — LOW is only collapsed, its full contents
+    // reachable by expanding), so the snapshot IS exactly what the user can see. We never
+    // clear something unreachable.
+    matched = rehydrate(state.lastDigest?.items || []);
+  } else {
+    ({ matched, invalid } = resolveNumbers(state, numbers));
+  }
   if (matched.length === 0) {
-    await deliver(delivery, noMatchMessage(numbers));
+    await deliver(delivery, all ? '✅ Nothing to clear — run a `digest` first.' : noMatchMessage(numbers));
     return { affected: 0, invalid };
   }
   mutate(state, matched.map((it) => it.messageId));
-  const refs = matched.map((it) => `#${it.n}`).join(', ');
+  const refs = all ? `all ${matched.length} item${matched.length === 1 ? '' : 's'}` : matched.map((it) => `#${it.n}`).join(', ');
   const tail = invalid.length ? ` (no item: ${invalid.join(', ')})` : '';
   await deliver(delivery, confirm(refs) + tail);
-  await rerender(state, delivery, footerHint);
+  await rerender(userId, state, delivery, footerHint);
   return { affected: matched.length, invalid };
 }
 
-export function runDone({ delivery, footerHint, numbers }) {
+export function runDone({ userId, delivery, footerHint, numbers, all }) {
   return applyToMatched({
-    delivery, footerHint, numbers,
+    userId, delivery, footerHint, numbers, all,
     mutate: store.markDone,
     confirm: (refs) => `✅ Marked ${refs} as done.`,
   });
 }
 
-export function runSnooze({ delivery, footerHint, numbers }) {
+export function runSnooze({ userId, delivery, footerHint, numbers, all }) {
   return applyToMatched({
-    delivery, footerHint, numbers,
+    userId, delivery, footerHint, numbers, all,
     mutate: (state, ids) => store.snooze(state, ids, config.snoozeHours),
     confirm: (refs) => `😴 Snoozed ${refs} for ${config.snoozeHours}h.`,
   });

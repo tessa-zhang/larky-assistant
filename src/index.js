@@ -4,8 +4,8 @@ import { config } from './config.js';
 import { getSelf } from './lark.js';
 import { runDigest, runDone, runSnooze } from './commands.js';
 
-const CLI_FOOTER = '↩ Run `npm run done 2` / `npm run snooze 1 3` · `npm run digest` to refresh';
-const BOT_FOOTER = '↩ Reply `done 2` or `snooze 1 3` · type `digest` to refresh';
+const CLI_FOOTER = '↩ Run `npm run done 2` (or `-- all`) / `npm run snooze 1 3` · `npm run digest` to refresh';
+const BOT_FOOTER = '↩ Reply `done 2` (or `done all`) / `snooze 1 3` · type `digest` to refresh';
 
 // Lark API: app/identity is missing a required permission scope.
 const LARK_ERROR_MISSING_SCOPE = 99991672;
@@ -35,10 +35,11 @@ async function cmdDigest(self) {
 }
 
 async function cmdDone(self, args) {
-  const numbers = parseNumbers(args);
-  if (!numbers.length) return console.error('Usage: npm run done -- 2 3');
+  const all = /^all$/i.test(args.join(' ').trim());
+  const numbers = all ? null : parseNumbers(args);
+  if (!all && !numbers.length) return console.error('Usage: npm run done -- 2 3   (or: all)');
   const { delivery, footerHint } = cliDelivery(self);
-  const r = await runDone({ delivery, footerHint, numbers });
+  const r = await runDone({ userId: self.openId, delivery, footerHint, numbers, all });
   console.log(`Done: ${r.affected} item(s).`);
 }
 
@@ -46,7 +47,7 @@ async function cmdSnooze(self, args) {
   const numbers = parseNumbers(args);
   if (!numbers.length) return console.error('Usage: npm run snooze -- 1 3');
   const { delivery, footerHint } = cliDelivery(self);
-  const r = await runSnooze({ delivery, footerHint, numbers });
+  const r = await runSnooze({ userId: self.openId, delivery, footerHint, numbers });
   console.log(`Snoozed: ${r.affected} item(s).`);
 }
 
@@ -120,9 +121,14 @@ async function cmdListen(self) {
           digestRunning = false;
         }
       } else if (/^done\b/i.test(cmd)) {
-        await runDone({ delivery, footerHint: BOT_FOOTER, numbers: parseNumbers([cmd.replace(/^done/i, '')]) });
+        const rest = cmd.replace(/^done/i, '').trim();
+        const all = /^all$/i.test(rest);
+        // State is keyed by the acting user (the DM sender), so done/snooze read+write
+        // that user's own digest snapshot — never another user's. Today the gate above
+        // limits senders to the owner; when it opens for multi-user this already routes.
+        await runDone({ userId: senderId, delivery, footerHint: BOT_FOOTER, all, numbers: all ? null : parseNumbers([rest]) });
       } else if (/^snooze\b/i.test(cmd)) {
-        await runSnooze({ delivery, footerHint: BOT_FOOTER, numbers: parseNumbers([cmd.replace(/^snooze/i, '')]) });
+        await runSnooze({ userId: senderId, delivery, footerHint: BOT_FOOTER, numbers: parseNumbers([cmd.replace(/^snooze/i, '')]) });
       }
     } catch (err) {
       console.error('Command failed:', err.message);

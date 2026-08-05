@@ -1,11 +1,29 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { MS_PER_HOUR } from './time.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const STATE_PATH = join(__dirname, '..', 'state.json');
+const DEFAULT_STATE_DIR = join(__dirname, '..', 'state');
+// Per-user state lives in <STATE_DIR>/<open_id>.json so multiple users on one instance
+// never clobber each other's done/snooze/digest-snapshot/cache (R2 multi-user — a single
+// shared file let one user's `done`/`done all` act on another's digest). STATE_DIR is
+// read lazily so a hosted deploy (or a test) can point it elsewhere at runtime.
+const stateDir = () => process.env.STATE_DIR || DEFAULT_STATE_DIR;
+// Pre-multi-user single-user file at the repo root, migrated into the first user's
+// per-user file on load — but ONLY when using the default dir. A custom STATE_DIR
+// (test / hosted volume) starts clean and never touches this legacy file.
+const LEGACY_STATE_PATH = join(__dirname, '..', 'state.json');
+
+/**
+ * Per-user state file path. An open_id is `ou_`+hex, but sanitize defensively so a
+ * malformed value can never escape the state dir via path traversal.
+ */
+function userStatePath(openId) {
+  const safe = String(openId || 'default').replace(/[^A-Za-z0-9_-]/g, '_');
+  return join(stateDir(), `${safe}.json`);
+}
 
 const EMPTY_STATE = {
   lastRunAt: null,
@@ -21,19 +39,29 @@ const EMPTY_STATE = {
   threadSummaryCache: {},
 };
 
-export async function load() {
-  if (!existsSync(STATE_PATH)) return { ...EMPTY_STATE };
+export async function load(openId) {
+  await mkdir(stateDir(), { recursive: true });
+  const p = userStatePath(openId);
+  // One-time migration from the pre-multi-user single file: the FIRST user to load
+  // inherits it (that's this instance's original single-user owner). Rename it into
+  // their per-user file — a move, so no second user picks it up, and it replaces any
+  // stale prototype file for that id. Gated to the default dir so a custom STATE_DIR
+  // (test / hosted volume) never touches it; new/hosted deploys have no legacy file.
+  if (!process.env.STATE_DIR && existsSync(LEGACY_STATE_PATH)) {
+    try { await rename(LEGACY_STATE_PATH, p); } catch { /* raced by a concurrent load — fall through */ }
+  }
+  if (!existsSync(p)) return { ...EMPTY_STATE };
   try {
-    const raw = await readFile(STATE_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    return { ...EMPTY_STATE, ...parsed };
+    const raw = await readFile(p, 'utf8');
+    return { ...EMPTY_STATE, ...JSON.parse(raw) };
   } catch (err) {
-    throw new Error(`state.json is corrupt (${err.message}). Fix or delete it.`);
+    throw new Error(`state for ${openId} is corrupt (${err.message}). Fix or delete ${p}.`);
   }
 }
 
-export async function save(state) {
-  await writeFile(STATE_PATH, JSON.stringify(state, null, 2) + '\n', 'utf8');
+export async function save(openId, state) {
+  await mkdir(stateDir(), { recursive: true });
+  await writeFile(userStatePath(openId), JSON.stringify(state, null, 2) + '\n', 'utf8');
 }
 
 /** Drop snoozes whose timer has elapsed. Mutates + returns state. */

@@ -24,9 +24,12 @@ export function hasMeaningfulText(text) {
   return stripped.length > 0;
 }
 
-// Sender types that are automated noise (release bots, alert apps, etc.).
-// `--exclude-sender-type bot` drops only `bot`; `app` senders slip through the
-// API filter, so we also drop them here.
+// Sender types that are automated (release bots, alert apps, Slack mirrors, and
+// workflow/booster apps). Filtered in-code via passesSenderFilter — NOT the API's
+// `--exclude-sender-type` flag, which is too blunt: it drops `app` as well as `bot`
+// (verified live) and can't inspect mentions[], so it was silently killing real
+// direct @me pings from workflow apps. Dropped by default; a bot/app that @mentions
+// me directly in a group is rescued. See passesSenderFilter + SPEC.
 const AUTOMATED_SENDER_TYPES = new Set(['bot', 'app']);
 
 /**
@@ -38,6 +41,20 @@ const AUTOMATED_SENDER_TYPES = new Set(['bot', 'app']);
  */
 export function mentionsUser(mentions, selfOpenId) {
   return (mentions || []).some((m) => m.id === selfOpenId);
+}
+
+/**
+ * Sender-type gate — replaces the API's `--exclude-sender-type` flag on the mention
+ * search (that flag drops `app` too and can't inspect mentions[], so it was killing
+ * real pings). A human sender always passes. An automated sender (bot/app) passes
+ * ONLY when it @mentions me DIRECTLY in a group — `isBroadcast === false` and not a
+ * DM: a workflow/booster app naming me is a genuine, actionable ask, mirroring the
+ * noise-channel direct-@me carve-out. An automated DM is a notification, not a
+ * person, so it drops. See SPEC "Drop automated senders".
+ */
+export function passesSenderFilter(item) {
+  if (!AUTOMATED_SENDER_TYPES.has(item.senderType)) return true;
+  return !item.isDM && !item.isBroadcast;
 }
 
 /**
@@ -90,13 +107,19 @@ export function parsePosition(raw) {
  * position. The key is per-user because `threadWatermark` is mine and the summary is
  * framed around what *I* must do.
  */
+// Bump when the classifier PROMPT changes: cached summaries store the OLD prompt's
+// urgency/category/summary, so a version tag in the key orphans the stale entries
+// (they age out via TTL) and the next run re-classifies under the new prompt. v2:
+// urgency reframed to be relative to what the user must do, not topic severity.
+export const SUMMARY_CACHE_VERSION = 2;
 export function threadCacheKey(threadId, newestPos, threadWatermark) {
   if (!threadId || newestPos == null) return null;
-  return `${threadId}|${newestPos}|${threadWatermark ?? 'none'}`;
+  return `v${SUMMARY_CACHE_VERSION}|${threadId}|${newestPos}|${threadWatermark ?? 'none'}`;
 }
 
 function normalize(msg, { isDM, selfOpenId }) {
   const text = (msg.content || '').trim();
+  const senderType = msg.sender?.sender_type || null;
   return {
     messageId: msg.message_id,
     chatId: msg.chat_id,
@@ -116,8 +139,10 @@ function normalize(msg, { isDM, selfOpenId }) {
     // labelled and down-ranked downstream. DMs are never broadcasts.
     isBroadcast: !isDM && !mentionsUser(msg.mentions, selfOpenId),
     senderId: msg.sender?.id || null,
-    senderName: msg.sender?.name || msg.sender?.id || 'Someone',
-    senderType: msg.sender?.sender_type || null,
+    // Automated senders (app/bot) often carry no display name in the payload (just
+    // an app_id like `cli_…`) — show a clean 'Bot' label instead of the raw id.
+    senderName: msg.sender?.name || (AUTOMATED_SENDER_TYPES.has(senderType) ? 'Bot' : msg.sender?.id) || 'Someone',
+    senderType,
     text,
     createTime: parseCreateTime(msg.create_time),
     // Deep link for the Jump button. Verbatim for non-thread messages; rebuilt
@@ -204,6 +229,23 @@ function pickLatest(members) {
 }
 
 /**
+ * The direct-@me messages in a bundle (excludes @all broadcasts + DM lines),
+ * slimmed for the card's per-@ expander — oldest→newest so the list reads in
+ * conversation order. Keeps only what the card needs: sender, a bounded raw excerpt
+ * (previewText cleans it at render), and the message's own jump link. Drives the
+ * "N @you" badge + the expander so a multi-ask thread doesn't hide earlier @s behind
+ * the single bundle summary (R6 follow-up).
+ */
+function atMeMentions(members) {
+  return members
+    .filter((m) => !m.isDM && !m.isBroadcast)
+    .sort((a, b) =>
+      (a.createTime?.getTime() || 0) - (b.createTime?.getTime() || 0) ||
+      (a.position ?? 0) - (b.position ?? 0))
+    .map((m) => ({ sender: m.senderName, text: clip(m.text, 300), link: m.link }));
+}
+
+/**
  * Group the filtered unread items into rows (replaces the old per-chat collapse).
  * Each row carries the representative (the latest message — it supplies the card's
  * verbatim line + jump link), the `bundleType`, the `members` (all unread items in
@@ -218,12 +260,20 @@ export function groupRows(items) {
     if (!g) { g = { type, members: [] }; byKey.set(key, g); }
     g.members.push(it);
   }
-  return [...byKey.values()].map(({ type, members }) => ({
-    ...pickLatest(members),
-    bundleType: type,
-    members,
-    chatUnreadCount: members.length,
-  }));
+  return [...byKey.values()].map(({ type, members }) => {
+    const mentions = atMeMentions(members);
+    return {
+      ...pickLatest(members),
+      bundleType: type,
+      members,
+      chatUnreadCount: members.length,
+      // `mentionCount` is the count of unreplied *direct @you* messages in the bundle;
+      // it stays the @me count even after buildThreadBundle overwrites chatUnreadCount
+      // with the thread's TOTAL unread. `mentions` is the slim list for the expander.
+      mentions,
+      mentionCount: mentions.length,
+    };
+  });
 }
 
 /** Truncate a single message's text for inclusion in a bundle. */
@@ -394,7 +444,15 @@ async function buildWatermark(self) {
  */
 export async function fetchSince(startISO, self, state) {
   const [mentionRaw, dmRaw, watermark] = await Promise.all([
-    searchMessages({ isAtMe: true, chatType: 'group', start: startISO, excludeSenderType: 'bot' }),
+    // No `--exclude-sender-type` on the mention search: the flag is too blunt — it
+    // drops `app` as well as `bot` (verified) and can't see mentions[], so it was
+    // silently killing real direct @me pings from workflow/booster apps. Sender
+    // filtering happens in-code below (passesSenderFilter), where a bot/app that
+    // names me directly is kept. See SPEC.
+    searchMessages({ isAtMe: true, chatType: 'group', start: startISO }),
+    // p2p keeps the pre-filter: a DM is never a direct-@me-via-mentions and never a
+    // broadcast, so every automated DM is dropped in-code regardless — pre-filtering
+    // at the API here is pure fetch-volume savings with no behavioural change.
     searchMessages({ chatType: 'p2p', start: startISO, excludeSenderType: 'bot' }),
     buildWatermark(self),
   ]);
@@ -421,10 +479,13 @@ export async function fetchSince(startISO, self, state) {
     return true;
   });
 
-  // Drop automated senders (bots + apps: release cards, alert apps, …).
+  // Sender filter (now fully in-code — see passesSenderFilter). Automated senders
+  // (bot/app) drop by default, EXCEPT a bot/app that @mentions me directly in a
+  // group (a workflow/booster app naming me is a real ask, not broadcast noise).
   items = items.filter((it) => {
-    if (AUTOMATED_SENDER_TYPES.has(it.senderType)) { skipped.automated++; return false; }
-    return true;
+    if (passesSenderFilter(it)) return true;
+    skipped.automated++;
+    return false;
   });
 
   // Drop done/snoozed, deleted, and empty messages.

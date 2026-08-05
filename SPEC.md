@@ -19,7 +19,8 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
 - [x] AI urgency / category / ≤15-word summary classification
 - [x] Interactive card: urgency-grouped, numbered, verbatim excerpt, jump link
 - [x] `done` / `snooze` text commands (re-render from cached snapshot)
-- [x] Fixed 3-day lookback window (re-surfaces current backlog each run)
+- [x] Fixed **7-day** rolling lookback window (re-surfaces current backlog each run; default
+      bumped 72h→168h on 2026-07-02 — see **R8** for the parked stable-anchor follow-up)
 - [x] Bot/app + noise-channel filtering; per-run cap with skip reporting
 - [x] Local JSON state, no DB
 - [x] **Jump-button link fix** — Lark emits a broken `/client/thread/open` applink
@@ -77,9 +78,10 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
 - [x] **LOW-only digest expands** (R3 refinement) *(2026-07-02)*: when **LOW/FYI is the only
       bucket** (no HIGH/MEDIUM), it now renders **expanded/flat** instead of inside the collapsed
       panel — a lone collapsed bucket reads like the empty state and hides the only content behind
-      a tap. Collapse still kicks in whenever HIGH/MEDIUM are present (that's what it protects). The
-      `LOW_DISPLAY_LIMIT` cap + "+N more" line still guard overflow in **both** modes (shared
-      `lowItems` renderer). Unit-tested + visually verified on both paths.
+      a tap. Collapse still kicks in whenever HIGH/MEDIUM are present (that's what it protects).
+      *(Superseded 2026-07-20: the `LOW_DISPLAY_LIMIT` cap + "+N more" line were **retired** — LOW
+      now lists every item; see the "no-cap + `done all`" entry below.)* Unit-tested + visually
+      verified on both paths.
 - [x] **Noise filter no longer hides direct @s** (bug) *(2026-07-02)*: a live trace found a real
       direct @me in `ta-engineer-coordination | Slack` being dropped (its resolved name carries a
       hidden `| Slack` suffix). Two fixes: (1) the **`… | Slack` pattern is removed** — those are
@@ -97,8 +99,48 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       limit** (hit live). A per-listener in-flight flag now ignores duplicate triggers while a run
       is active — the first run's "⏳ Fetching…" ack already signals it's working. Single-user
       today; R2 multi-user keys it per user. See the limitations table.
+- [x] **Direct-@me from bots/apps rescued** (@-filter fix) *(2026-07-14)*: sender filtering moved
+      fully in-code (`passesSenderFilter`); a **bot/app that @mentions me directly in a group is
+      kept** (`!isDM && !isBroadcast`), while bot/app **broadcasts + automated DMs still drop**. Root
+      cause: the `--exclude-sender-type` API flag is too blunt — verified it drops `app` as well as
+      `bot` and can't see `mentions[]`, so it was silently eating ~25% of real @mentions (a workflow
+      "booster" app pinging me by name with refund/issuance/escalation asks). Dropped the flag on the
+      mention search (kept on p2p as a free pre-filter). Live-verified: 12 direct-@me app pings
+      resurfaced, 3 bot broadcasts still dropped. Unit-tested. Partly closes **R11**.
+- [x] **Per-@ count badge + expander** (R6 follow-up) *(2026-07-16)*: a bundled row (thread/chat) now
+      shows a **`N @you` badge** when it holds >1 unreplied direct @me, and — at top level — a
+      collapsible **per-@ expander** listing each ask (sender + excerpt + its own jump), so a multi-ask
+      thread no longer hides earlier @s behind the single bundle summary. Thread stays the row unit (R6
+      intact); the expander is **not** nested inside the LOW/FYI panel (Lark 2.0 nested-collapsible
+      unverified). `groupRows` carries `mentions`/`mentionCount`, persisted through the snapshot for
+      done/snooze re-renders. Card accepted live (31-item send); unit-tested.
+- [x] **Actor-relative urgency — "Named ≠ asked"** (@-classification fix) *(2026-07-16)*: urgency is now
+      judged by **what *I* must personally do**, not the topic's severity — routing/FYI notes that name
+      me so *others* act are `low` even on an urgent topic. Fixes booster "escalation-contact" pings
+      riding a live-incident topic into HIGH. The classifier is told my name (to tell "to me" from
+      "about me"); the summary cache is versioned so it re-classifies rather than serving stale verdicts.
+      Live: booster routing-notes all demoted to LOW with self-explaining summaries (0 high / 2 med / 25
+      low). Subsumes the @all broadcast bias + much of **R5**. **Calibration confirmed (Tessa,
+      2026-07-16):** mediums were genuinely her action items; the per-LOW `FYI:` summaries land as
+      assurance nothing's missed. Unit-tested + live-verified.
+- [x] **LOW/FYI lists all + `done all`** (digest UX) *(2026-07-20)*: retired the `LOW_DISPLAY_LIMIT`
+      display cap — LOW still collapses behind the panel (R3), but expanding now lists **every** low
+      item (each with its `FYI:` summary) instead of "~10 + N more" with an unreachable, unactionable
+      tail. Added **`done all`** to clear the whole delivered digest in one command — safe by
+      construction (no cap ⇒ the snapshot equals what was shown, so nothing unseen is cleared). LOW
+      volume stays bounded by `MAX_MESSAGES`. Config knob + `.env`/table refs removed; unit-tested.
+- [x] **Per-user state keying** (R2 multi-user) *(2026-07-20)*: state moved from a single shared
+      `state.json` to **`state/<open_id>.json`** — done/snooze/digest-snapshot/summary-cache are now
+      isolated per user, so one user's `done`/`done all` can never act on another's digest (the old
+      shared `lastDigest` slot was the break). The acting user's `open_id` is threaded through
+      `runDigest`/`runDone`/`runSnooze` (DM sender in bot mode, `self` in CLI); `STATE_DIR` overrides
+      the location; the legacy single file migrates once into the first user's file. `state/`
+      gitignored (holds confidential booking data). Closes R2 remaining-item (2); the multi-tenant
+      listener + per-user `--profile` reads (item 3) is the next piece. Unit-tested (per-user
+      isolation) + path-traversal-safe.
 
-**🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R2 launch**, then **R8** (reliability — bumped 2026-07-02).
+**🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R2 launch**. (R8's interim
+7d bump shipped 2026-07-02; its fuller stable-anchor design is parked, not blocking.)
 - [ ] **R2 — Hosted bot** (committed; the launch step after R3): frictionless, installable +
       runnable *without an IDE*, ideally entirely inside Lark. **Pre-launch token-guard gate:
       ✅ shipped + live-verified 2026-06-26** (per-thread summary cache, above). **Decisions
@@ -117,19 +159,48 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       15 items) and **bot-mode** (the R2 surface — v2 card delivered, cache reused 1 summary at 0
       tokens). **Remaining for R2:** the multi-user build — (1) bot-driven onboarding
       (`p2p_chat_create` → Authorize card → per-user device-flow into a fresh profile),
-      (2) per-user state (done/snooze/cache keyed by user), (3) multi-tenant listener that routes
+      (2) ✅ **per-user state (done/snooze/cache keyed by user) — shipped 2026-07-20**
+      (`state/<open_id>.json`; see State section + tracker), (3) multi-tenant listener that routes
       each user's `digest`/`done`/`snooze` to a run under their `--profile`, (4) an always-on host
       for the event listener.
-- [ ] **R8 — Dynamic lookback** (to design; **priority-bumped 2026-07-02**): start-of-week moving
-      window + persistently track every unaddressed @ so nothing ages out silently. **Why bumped:**
-      today's noise-filter trace flagged silent 72h aging as one of the two real "missed ping" risks
-      — silently dropping a teammate's @ after 3 days is a trust issue best closed around the R2
-      launch. **Open:** gate R2, or ship as the immediate follow-up? (interacts with the
-      stateless-window design — see Roadmap R8).
-- [ ] **R5 — cc-mention down-ranking**: detect textual `cc @me`, tag + bias low (3rd
-      lane alongside @all)
+      **✅ RELAUNCHED on the least-privilege app (2026-08-04):** migrated off `cli_aaaba7cf9a211ed1` to a
+      **from-scratch least-privilege app `cli_aacf7cc512b8ded2`** (new open_id `ou_566409…`). Locked
+      **11-scope** user-consent set + the bot chat-interface (event `im.message.receive_v1` +
+      `im:message.p2p_msg:readonly`, persistent connection). Verified end-to-end: `SEND_AS=bot` digest
+      delivered a live card (49 items; watermark skipped 361 read + 10 reacted), and inbound DM `hello`
+      received over the bot. `SEND_AS` default flipped `user`→`bot`. Cost 4 approval rounds + a
+      `base`-vs-`basic_profile` naming trap (see Least-privilege section). **Still remaining for R2:**
+      (1) bot-driven onboarding, (3) multi-tenant profile-routing listener, (4) always-on host — the cohort build.
+- [ ] **R12 — Beta scheduling & host** (self-beta, added 2026-07-02; near-term, precedes R2's
+      always-on host): run the digest on a fixed interval (default hourly, new user env knob) and
+      keep the command listener up **unattended while my laptop is awake** — the pragmatic stopgap
+      before R2 item (4). Laptop-only/awake-only by decision (a closed lid sleeps); `launchd`-supervised;
+      delivery via self-chat, no bot provisioning needed. Not building yet — captured on Tessa's call.
+- [ ] **R8 — Dynamic lookback** (to design; **interim shipped 2026-07-02**): the fixed window's
+      default was bumped **72h→168h (7d)** as the pragmatic ~80%-of-the-value step — a week matches
+      most people's clear-out rhythm, and it stays a **user-varyable knob** (the ideal range is
+      role-dependent). **Still open (the real R8):** the window is still *rolling*, so items slide
+      off the far edge; a **stable weekly anchor** would stop that slide. A full anchor design
+      (Friday-before-Monday, resets Monday) + persistent tracking were worked through 2026-07-02 and
+      **deferred** — the anchor bakes in a "weekly clearing" assumption that may not fit every role,
+      and persistent tracking would dump a huge backlog on a new user's first digest. See Roadmap R8.
+- [ ] **R5 — cc-mention down-ranking** (largely covered 2026-07-16 by actor-relative classification —
+      a cc now reads as "named, not asked" → `low`; what's left is the explicit **`👀 cc` tag** +
+      deterministic detection so the card shows *why* it's downranked): detect textual `cc @me`, tag +
+      bias low (3rd lane alongside @all)
+- [ ] **R14 — End-of-day "Catch Me Up" brief** (good-to-have, added 2026-07-20): a once-a-day,
+      glanceable **synthesis** of the LOW/FYI bucket — the *"what happened around me"* mirror of the
+      digest's *"what must I do."* cc's / @all's / routing notes distilled into a few themed lines
+      (not re-listed) so awareness info doesn't get scrolled past. Pragmatic first cut = an on-demand
+      `catchup` command (no host dep); scheduled EOD delivery rides **R12**. See Roadmap R14.
 - [ ] **R7 — Interactive per-item done/snooze**: per-row buttons; `done` drops a ✅
       reaction so it survives without a global list (needs callback spike + R2)
+- [ ] **R13 — In-Lark interactive triggers** (added 2026-07-09; shares R7's card-callback spike):
+      a **`↻ Refresh` button on the digest card** to re-run without typing `digest`, and — optionally —
+      a **persistent bot menu** as an always-available trigger. **Gated on the same unverified
+      capability as R7**: callback events over the lark-cli WS bus (we consume only
+      `im.message.receive_v1` today; `done`/`snooze` are text for exactly this reason). Build the
+      button *with* R7's spike — one plumbing change unlocks both. Not building yet.
 - [ ] **R1 — Priority groups** (should-have, opt-in): surface/consider non-@
       messages from groups I designate as relevant
 - [ ] **R9 — Org-signal triage** (low-priority / good-to-have): weight urgency by the
@@ -139,9 +210,10 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       explicit "I don't care here" signal — drop or hard-downrank @s from muted chats. Gated
       on a feasibility spike: is per-user mute status even queryable? (unread-badge precedent
       suggests maybe not)
-- [ ] **R11 — Alert-channel urgency pass** (low-priority / good-to-have, explore-first): rescue
-      genuinely HIGH messages (incidents) from the bot/app-sender drop — real outages often come
-      *from* alert bots, so the blanket drop has a false-negative hole. Needs a relevance filter + cap.
+- [ ] **R11 — Alert-channel urgency pass** (low-priority / good-to-have, explore-first; **direct-@me
+      part shipped 2026-07-14**): the direct-@me-from-a-bot/app carve-out now rescues pings where a bot
+      names me. **Residual:** a bot that *broadcasts* an incident to an alert channel with no direct
+      @me still drops — that firehose case still needs a relevance filter + cap.
 
 ---
 
@@ -231,12 +303,14 @@ once, clearable with `done`).
 **Layered with the other filters**, an item is shown only if ALL hold:
 1. **Unread** by the watermark rule **and not reacted to** by me (above).
 2. **Not** in `doneMessageIds` and **not** currently snoozed.
-3. Within the **lookback window** — a **fixed** `LOOKBACK_HOURS` (default **72h /
-   3 days**): `start = now − LOOKBACK_HOURS`, **independent of when the digest last
-   ran**. Running a digest doesn't read anything, so each run must re-surface the
-   whole current unread backlog in the window — not just messages newer than the
-   last run. Items leave the digest only by replying (watermark), reacting, `done`,
-   or `snooze`.
+3. Within the **lookback window** — a **fixed, rolling** `LOOKBACK_HOURS` (default
+   **168h / 7 days**, bumped from 72h on 2026-07-02): `start = now − LOOKBACK_HOURS`,
+   **independent of when the digest last ran**. Running a digest doesn't read
+   anything, so each run must re-surface the whole current unread backlog in the
+   window — not just messages newer than the last run. Items leave the digest only
+   by replying (watermark), reacting, `done`, or `snooze`. Because it rolls with
+   `now`, an item still slides off the far edge after a week — a *stable weekly
+   anchor* that stops the slide is the parked follow-up (**R8**).
 
 **Known blind spot (irreducible):** a message I *read but never replied or reacted
 to* (e.g. a "sureee" closer, or a group @mention I read silently) will appear once.
@@ -278,10 +352,16 @@ All times are ISO 8601 with a **numeric offset, no milliseconds**
 
 ```bash
 # 1. Unread @mentions  (Lark's "@ Mentions" tab == --is-at-me)
+#    NB: NO --exclude-sender-type here — that flag also drops `app` senders and can't
+#    see mentions[], so it was silently killing real direct @me pings from workflow
+#    apps. Sender filtering is done in-code (passesSenderFilter), where a bot/app that
+#    names me directly is kept. (2026-07-14)
 lark-cli im +messages-search --as user --is-at-me --chat-type group \
-  --start <LOOKBACK> --exclude-sender-type bot --page-all --json
+  --start <LOOKBACK> --page-all --json
 
-# 2. DMs (p2p) — note: NOT --is-at-me; returns my own messages too (needed for watermark)
+# 2. DMs (p2p) — note: NOT --is-at-me; returns my own messages too (needed for watermark).
+#    Keeps --exclude-sender-type: an automated DM is dropped in-code anyway, so
+#    pre-filtering it at the API is free (no behavioural change), just less to fetch.
 lark-cli im +messages-search --as user --chat-type p2p \
   --start <LOOKBACK> --exclude-sender-type bot --page-all --json
 
@@ -307,9 +387,15 @@ button on **non-thread** messages, but for thread messages Lark emits a **malfor
 - Mark group messages where my `open_id` ∉ `mentions[]` as **`isBroadcast`** (@all);
   keep them, but they're labelled and down-ranked downstream.
 - Drop my own messages (`sender.id == SELF`).
-- Drop **automated senders** — `sender_type` of `bot` *or* `app`. The
-  `--exclude-sender-type bot` search flag drops only `bot`; `app` senders (release
-  cards, alert apps, Slack mirrors) slip through it, so they're dropped here too.
+- Filter **automated senders** in-code (`passesSenderFilter`) — `sender_type` of `bot`
+  *or* `app` (release cards, alert apps, Slack mirrors, workflow/booster apps). Dropped
+  by default, **except a bot/app that @mentions me directly in a group** (`!isDM &&
+  !isBroadcast`): a workflow/booster app naming me by open_id is a real, actionable ask,
+  not broadcast noise, so it's kept (mirrors the noise-channel direct-@me carve-out).
+  This is done **in-code, not via `--exclude-sender-type`**: that API flag is too blunt —
+  verified live it drops `app` as well as `bot`, and it can't inspect `mentions[]`, so it
+  was silently killing ~25% of real @mentions (2026-07-14). An automated **DM** has no
+  `mentions[]` axis ⇒ still dropped.
 - Drop `done`/snoozed; drop `deleted`; drop messages with **no meaningful text**
   after stripping placeholders (`[Sticker]`, `[Image: …]`, `[File: …]`, …).
 - Drop known **noise channels** by name *when resolvable* — but **only broadcasts** in
@@ -331,25 +417,49 @@ button on **non-thread** messages, but for thread messages Lark emits a **malfor
 
 ## AI classification
 
-Each surviving message gets an `urgency`, a `category`, and a ≤15-word `summary`
-focused on what the sender needs from me.
+Each surviving message gets an `urgency`, a `category`, and a ≤15-word `summary`.
+Urgency is judged **relative to what *I* must personally do** — not the topic's
+intrinsic severity. The classifier is told **who it triages for** (my display name is
+woven into the prompt via `classify(items, { userName })` → `systemPrompt`) so it can
+tell a message addressed *to* me from one that merely *names* me.
 
-**Urgency**
-- `high` — action required today: incident/outage/blocking, explicit sign-off, "urgent/ASAP/down/broken"
-- `medium` — response needed but not time-critical: reviews, questions, feedback
-- `low` — informational / FYI / casual chatter, no action needed
+**Urgency (actor-relative — the crux)** — a message can describe a serious incident
+yet require nothing from me, in which case it's `low` *for me*:
+- `high` — **I personally** must act today: I'm the one asked to decide, approve, sign
+  off, unblock, or answer something time-critical; or an incident I own.
+- `medium` — my input/response is wanted but not time-critical: reviews, questions
+  directed at me, feedback I owe.
+- `low` — no action needed from me: informational/FYI, or I'm only named for awareness,
+  context, or routing.
 
-**Category** — `incident` (prod broken/degraded), `decision_needed` (my approval
-or choice required), `review_request` (PRD/doc/code/design), `question` (I'm being
-asked something), `fyi` (informational only).
+**Named ≠ asked** — being @mentioned doesn't mean I must act. Routing/hand-off notes
+that name me so *others* act ("please mention Tessa for warehouse issues", "loop in",
+"X handles Y"), cc/FYI, and passing mentions are `low`/`fyi` **regardless of topic
+severity**. The gate: *does the sender need **me** to do something?* (Added 2026-07-16,
+after the bot-sender rescue surfaced booster "escalation-contact" routing notes as
+false HIGH — the topic was a live incident, but the ask was on the reader, not me.)
+This **subsumes the old broadcast bias** (an @all is just the strongest "named, not
+asked" case — `is_broadcast` is still passed as a signal) and covers much of **R5** (a
+cc = named, not asked).
 
-**Broadcast bias** — each message carries an `is_broadcast` flag (the @all signal
-above). Broadcasts are biased to `low`/`fyi`; they reach `medium` only when they
-demand a concrete action from me, `high` only for a genuine incident.
+**Category** — `incident` (prod broken/degraded), `decision_needed` (my approval or
+choice required), `review_request` (PRD/doc/code/design), `question` (I'm being asked
+something), `fyi` (informational only, or I'm only looped in).
 
-A chunked Claude call (`claude-sonnet-4-6`, ≤40 msgs/call, run concurrently) does
-the classification, with a `low`/`fyi` fallback so a message is never dropped on a
-parse error or when no API key is set.
+A chunked Claude call (`claude-sonnet-4-6`, ≤40 msgs/call, run concurrently) does the
+classification, with a `low`/`fyi` fallback so a message is never dropped on a parse
+error or when no API key is set. The per-thread **summary cache** is versioned
+(`SUMMARY_CACHE_VERSION`, [fetchMentions.js](src/fetchMentions.js)) so a classifier
+prompt change re-classifies rather than serving stale verdicts.
+
+**Calibration — confirmed (Tessa, 2026-07-16)** — the reframe is aggressive by design,
+so the risk was over-demoting a politely-phrased real ask. Validated on the live card:
+the `medium` items were **genuinely her action items**, the booster routing-notes all
+sat in `low`, and — a deliberate UX win — the per-LOW **`FYI: <why it's low>`** summary
+reads as *assurance nothing's being missed* rather than a silent drop. Split is
+LOW-heavy but correct for her inbox. Residual safety net regardless: a mis-ranked item
+still appears (collapsed LOW) with verbatim + jump, so nothing is ever *hidden*. Lever
+if it ever over-fires later: soften the "Named ≠ asked" wording.
 
 ---
 
@@ -368,7 +478,12 @@ chat (latest unread). Each item:
   would mark it read);
 - a `↗ Jump to message` URL button.
 
-LOW bucket capped (~10) with a "+N more" note. Empty state → `✅ You're all caught up!`.
+LOW/FYI **collapses** behind a `collapsible_panel` when HIGH/MEDIUM are present (R3) —
+but lists **every** low item inside (no display cap): each carries an assuring `FYI:`
+summary, so expanding shows the whole tail instead of "~10 + N more" with no way to act
+on the rest (2026-07-20). A sole LOW bucket renders flat. **`done all`** clears the
+whole digest at once (safe — with no cap the snapshot is exactly what's shown). Empty
+state → `✅ You're all caught up!`.
 
 ---
 
@@ -379,6 +494,10 @@ re-verified in R7 — Lark does emit `card.action.trigger`)*, so today managemen
 text reply referencing the card numbers:
 
 - `done 2 3` → add to `doneMessageIds`; never resurface.
+- `done all` → clear the **whole delivered digest** at once. Safe by construction: the
+  card lists every item (no display cap; LOW is only collapsed, its full contents
+  reachable by expanding), so the snapshot *is* exactly what was shown — nothing unseen
+  is cleared. (2026-07-20)
 - `snooze 1` → hide for `SNOOZE_HOURS` (default 24h), then resurface if still unread.
 
 lark-cli has **no message-patch** method, so the card is **re-rendered and
@@ -386,7 +505,17 @@ resent** (not edited in place); survivors are renumbered.
 
 ---
 
-## State (`./state.json`)
+## State (`state/<open_id>.json`, per user)
+
+State is **keyed per user** — `state/<open_id>.json`, one file each — so multiple users
+on one instance never clobber each other's `done`/`snooze`/digest-snapshot/cache (R2
+multi-user; **shipped 2026-07-20**). A single shared file previously let one user's
+`done`/`done all` act on whoever ran `digest` last. `load(openId)`/`save(openId, state)`
+own the path; the acting user's `open_id` is threaded through `runDigest`/`runDone`/
+`runSnooze` (the DM sender in bot mode, `self` in CLI). `STATE_DIR` overrides the
+directory (tests, hosted data volume). The pre-multi-user single `state.json` is
+**migrated once** into the first user's per-user file on load (default dir only). Each
+file holds:
 
 ```json
 {
@@ -425,12 +554,11 @@ resent** (not edited in place); survivors are renumbered.
 | `ANTHROPIC_API_KEY` | — (required) | Claude classification; without it every item falls back to `low`/`fyi` |
 | `SEND_AS` | `user` | `user` → deliver to my self-chat (works today); `bot` → bot DM reply (needs published bot-send scopes) |
 | `CLAUDE_MODEL` | `claude-sonnet-4-6` | Classification model |
-| `LOOKBACK_HOURS` | `72` | Fixed lookback per run (3 days), independent of last run. `LOOKBACK_DAYS` still honored for back-compat (×24) |
+| `LOOKBACK_HOURS` | `168` | Fixed **rolling** lookback per run (7 days; bumped from 72h 2026-07-02), independent of last run. User-tunable per taste/role. `LOOKBACK_DAYS` still honored for back-compat (×24) |
 | `RAW_PREVIEW_CHARS` | `160` | Chars of the verbatim message shown under each summary (≈2 lines) |
 | `WATERMARK_LOOKBACK_DAYS` | `14` | How far back to scan my own messages when building the reply watermark |
 | `SNOOZE_HOURS` | `24` | How long `snooze` hides an item |
-| `LOW_DISPLAY_LIMIT` | `10` | Max LOW/FYI items rendered on the card (rest → "+N more") |
-| `MAX_MESSAGES` | `200` | Per-run fetch cap (rate-limit guard) |
+| `MAX_MESSAGES` | `200` | Per-run fetch cap (rate-limit guard; also bounds LOW volume) |
 | `LARK_USER_OPEN_ID` | auto | Override my open_id (else auto-detected from `auth status`) |
 
 No Lark secrets here — `lark-cli` owns Lark auth.
@@ -443,6 +571,7 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | Unread badge / count per chat | **Not exposed**; client-side only |
 | **My reactions on a message** | **Readable** ✅ — `reactions batch_query --as user` (cap 20 msgs/req, ≤10 reactions/msg); match `operator.operator_id` to my `open_id` |
 | Tell @all from a direct @mention | `--is-at-me` returns both; distinguish by whether my `open_id` ∈ `mentions[]` |
+| `--exclude-sender-type bot` scope | **Drops `app` too, not just `bot`** (verified 2026-07-14: the same 7d `--is-at-me` window returned 64 msgs without the flag vs 48 with — it removed exactly the 16 `app` msgs). It also can't inspect `mentions[]`, so it drops a bot/app **even when it @mentions me directly**. ⇒ don't use it on the mention search; filter senders in-code (`passesSenderFilter`) so a direct-@me workflow app survives |
 | Enumerate all my chats (`chat-list`) | Needs **Bot capability** activated (error `232025`) |
 | Resolve group chat names | Needs bot capability + `im:chat:readonly` |
 | Send as bot | Needs `im:message:send_as_bot` + `im:message` on a **published** version |
@@ -457,36 +586,60 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | **Shrink an over-scoped user token via re-auth** | **Can't.** Lark *accumulates* prior consent — re-running `auth login --scope <subset>` while the app still *offers* the broad set returns the **full union**, not the subset (verified 2026-07-02: fresh `grantedAt`, byte-identical `scope` string, `Newly granted: (none)`). To narrow a token you must **remove the scopes at the app/console level** (the app-offered set is the ceiling; a fresh re-auth then mints a narrow token), or revoke the app in Lark's *user* security settings. `lark-cli auth logout` clears only the **local** token; re-login re-accumulates. ⇒ enforce least-privilege at the **app** layer, and verify **after** trimming. |
 | Fire digests back-to-back | Trips `99991400 request trigger frequency limit`. A single digest is a **burst** — `messages-search` ×3 + `chats.get` ×N + `reactions batch_query` — so two overlapping runs (a 2nd `digest` before the 1st returns) double it and hit the cap. Mitigated by the listener **in-flight guard** (2026-07-02); also avoid rapid `npm run listen` restarts (long-connection re-establishment counts toward frequency too). **Transient** — clears after a short cooldown; not a scope/auth issue. |
 
-## Least-privilege scopes (R2 beta) — target set (verify *after* trimming; re-auth can't pre-narrow — see API limits)
+## Least-privilege scopes (R2 beta) — LOCKED & VERIFIED 2026-08-04
 
-The bot's Lark scopes started broad (it doubled as a **Lark MCP endpoint for Claude**).
-inlark's *actual* surface is small — it reads as the **user**, delivers as the **bot**:
+R2 launched on a **new app `cli_aacf7cc512b8ded2`**, built least-privilege *from scratch* (not a
+trim of the old broad MCP-endpoint app) — so the app-offered ceiling *is* the least-privilege set,
+sidestepping the "can't pre-narrow via re-auth" trap. inlark reads as the **user**, delivers +
+receives as the **bot**. Verified end-to-end 2026-08-04 (`SEND_AS=bot` digest delivered a live card;
+`hello` received over the bot). **User-identity consent set = 11 scopes** — the re-auth-sensitive set,
+locked before cohort onboarding:
 
 | Function | `lark-cli` call | Scope |
 |---|---|---|
 | Scan @mentions + DMs | `im +messages-search` | `search:message` (+ `im:message.{group,p2p}_msg:get_as_user`) |
+| Resolve **sender names** on the card | `im +messages-search` enrichment | **`contact:user.basic_profile:readonly`** — open_id→display name; the enrichment **hard-requires** it (no skip flag; caught 2026-08-03 when the digest threw `Fatal: missing contact:user.basic_profile:readonly`). ⚠️ **NOT** `contact:user.base:readonly` ("user's basic info") — a *different, insufficient* scope (base was present when the API still threw). Add by exact **code**, not the console label. |
 | Thread context (R6) | `im +threads-messages-list` | `im:message:readonly` |
 | Read own reactions | `im reactions batch_query` | `im:message.reactions:read` |
-| Resolve group names | `im chats get` | `im:chat:read` |
+| Resolve group names **+ R10 mute** | `im chats get` / `im +chat-list --exclude-muted` | `im:chat:readonly` — covers name-resolution *and* per-user mute-listing (R10 proven queryable 2026-07-20 via `--exclude-muted`; no extra scope) |
 | Identity (open_id / name) | `auth status` | `contact:user.base:readonly`, `auth:user.id:read` |
-| **Org-signal triage** (R9, in build) | `contact +user-get` — sender department + reporting-manager (`leader_user_id`) | `contact:department.base:readonly` + the user department/manager field scopes — **exact names TBC against the parallel R9 build before locking** |
-| Deliver digest (if `SEND_AS=user`) | `im +messages-send` | `im:message.send_as_user` |
-| Long-lived token (auto-refresh) | — | `offline_access` (**critical** — no refresh_token without it) |
+| **Org-signal triage** (R9 — a key prioritisation signal; no code yet) | `contact +get-user` (not `+user-get`) — sender's `department_ids` + `leader_user_id` (reporting manager) | **`contact:user.department:readonly`** — one granular scope unlocks **both** fields (Lark doc: *获取用户组织架构信息 / retrieve user org structure*; verified 2026-07-02 that `user.base`+`basic_profile` return **neither** — `department_ids: null`, no `leader_user_id`). Add `contact:department.base:readonly` **only** if R9 resolves dept IDs→names/hierarchy. **Design fork:** read org data **as the bot** (org-stable tenant data) ⇒ user consent stays at the base 9; read **as the user** ⇒ this scope joins the per-user consent set. Same scope covers self + colleagues (subject to tenant contact-visibility — verify live once enabled). |
+| Long-lived token (auto-refresh) | — | `offline_access` (**critical** — no refresh_token; ~7-day refresh window ⇒ a user idle >7d must re-login, hit live 2026-07-29) |
 
-Everything else once granted — `base:*`, `docx:*`, feed/pins/recall, chat
-member/create/update, `contact:user:search`, reaction **write** — is unused → trim.
+**Bot/tenant scopes** (publish-time — adding these never triggers a user re-auth): `im:message:send_as_bot`
+(deliver the card), `im:message.p2p_msg:readonly` (**receive** DM commands `digest`/`done`/`snooze` — paired
+with the `im.message.receive_v1` event), `im:chat:readonly`.
 
-**Consent is not automatic.** *Removing* scopes needs no re-consent; *adding* one means
-**every already-onboarded user must re-authorize** (device flow) — token refresh never
-picks up new scopes. → Lock the set **before** onboarding the cohort; a later addition
-(e.g. R7 reaction-**write** for done-via-reaction) = re-touch everyone. **R9's contact
-scopes are folded into this pre-onboarding set for exactly that reason** — it's being built
-in a parallel session, so confirm the final scope names there and reconcile this row before
-we lock the cohort's grant.
+**Bot chat-interface setup** (one-time, app-level, **NOT per-user**): Event & Callbacks → subscription mode
+**persistent connection** + add event **"Message received" (`im.message.receive_v1`)** + the DM-receive scope
+**"Get direct messages sent to bot" (`im:message.p2p_msg:readonly`)** → **release the version** (approval ≠
+release; a device-flow consent showing fewer scopes than expected = the version isn't live yet). **Trap:** the
+event lists several "any one suffices" scopes, but each only delivers the message *type* it names — the **group**
+scope does NOT deliver p2p DMs; you need the **DM** one.
+
+**Dropped:** `im:message.send_as_user` — self-chat delivery deprecated; `SEND_AS` default flipped to `bot`
+(2026-08-04). **Deferred:** `im:message.reactions:write_only` (R7 done-✅) — will be bot-side ⇒ publish-time, no re-auth.
+
+Everything the old broad app once granted — `base:*`, `docx:*`, feed/pins/recall, chat
+member/create/update, `contact:user:search`, reaction **write** — is simply **absent** on the
+new app (never granted, nothing to trim).
+
+**Consent is not automatic.** *Removing* scopes needs no re-consent; *adding a user scope* means
+**every onboarded user must re-authorize** (device flow) — token refresh never picks up new scopes.
+Only **user** scopes force this; **bot/tenant** scopes take effect on publish (no re-auth), so
+future bot-side needs (R7 reaction-write, R13 bot menu) can be added freely. The 11-scope user set
+above is **locked & verified** (2026-08-04) before cohort onboarding — R9's `contact:user.department`
+is pre-folded so org-signal ships with no re-auth. **Setup order (per the launch):** add scopes +
+**release** the app version → per user: `lark-cli config init` (once) + device-flow `auth login` →
+verify on the token (`auth status` scope count = 11, incl. `contact:user.basic_profile:readonly`) → run.
+**Naming traps that cost us cycles:** `contact:user.base` ("basic info") ≠ `contact:user.basic_profile`
+("basic profile"); and the receive event's **group** scope ≠ the **DM** scope — match by exact code.
 
 ## Non-functional requirements
 
 - **On-demand only** — no polling; a run happens when I trigger `digest` (or `npm run digest`).
+  *(Relaxed by **R12**: a scheduled interval may also fire the digest. Still not event-polling —
+  it's a timed re-run of the same on-demand pipeline; nothing is marked read.)*
 - **Stateless window (by design)** — re-running re-surfaces the *same* current
   unread backlog within `LOOKBACK_HOURS`; a digest run does **not** mark anything
   read. Items leave only via replying (watermark), `done`, or `snooze`. (`lastRunAt`
@@ -497,8 +650,10 @@ we lock the cohort's grant.
   real-time: the reply-watermark adds a `--sender` search over
   `WATERMARK_LOOKBACK_DAYS`, so a wide window can take tens of seconds (~33s for
   24h, ~80s for 7d observed). The original "<10s" target does **not** hold for
-  large backlogs — acceptable for an on-demand tool, and the 72h (3-day) default
-  keeps the common case bounded.
+  large backlogs — acceptable for an on-demand tool. The default is now **168h (7d)**,
+  but the dominant cost is the watermark `--sender` scan over `WATERMARK_LOOKBACK_DAYS`
+  (14d, unchanged), so widening the mention/DM window from 3→7d adds little; the common
+  case stays bounded.
 - **Privacy** — message text is sent to the Anthropic API for classification;
   confirm this is acceptable for internal content before wider use.
 - **Auth resilience** — owned by `lark-cli`; a `needs_refresh` token is still
@@ -640,6 +795,8 @@ classification (only reaching higher when it genuinely asks something of me).
   whether to compute the flag heuristically (deterministic, drives the card tag) or
   let the classifier judge from text (it already sees it) — likely the heuristic
   flag for the tag + a prompt nudge, mirroring `is_broadcast`.
+- **Complement (R14):** the cc/FYI content R5 down-ranks is exactly what the end-of-day
+  **Catch Me Up** brief surfaces *positively* — R5 detects/tags it, R14 gives it a home.
 
 ### R6 — Multi-message summary across the unread bundle (should-have; sharpened 2026-06-23, NEXT UP)
 
@@ -697,29 +854,51 @@ Replace the text-command `done 2 3` flow with **per-row buttons** on the card.
 - **Feasibility spike first:** SPEC currently records "no card-button callbacks over
   the lark-cli WS bus" — re-verify, since Lark cards emit `card.action.trigger`
   events; confirm whether we can receive them (user vs bot identity). Likely couples
-  to R2 (publish + scopes).
+  to R2 (publish + scopes). **This same spike gates R13** (card refresh button + bot
+  menu) — one card-callback plumbing change unlocks per-item done/snooze *and* a
+  trigger button, so build them together.
 - **State model (decided — option b):** a `done` click drops a ✅ **reaction** on the
   message (bot, on my behalf), so the existing reaction-rule treats it as addressed
   on the next run — per-item buttons **without** a growing `doneMessageIds` list and
   **without** losing the "never resurfaces" guarantee. Needs a reaction-write scope.
 
-### R8 — Dynamic lookback window (to design, added 2026-06-18; **priority-bumped 2026-07-02**)
+### R8 — Dynamic lookback window (added 2026-06-18; **interim shipped + fuller design parked 2026-07-02**)
 
-**Priority bump (2026-07-02):** promoted to the lead item after R2. Today's noise-filter trace
-made the risk concrete — silent 72h aging is one of the two real "missed ping" blind spots (the
-other, bot/app drop, is R11), and shipping a bot to teammates that quietly drops their @s after
-3 days is a trust issue. Open sequencing question: **gate the R2 launch, or ship as the immediate
-follow-up?** Leaning follow-up (R8 is "to design" and non-trivial; 72h is a defensible beta
-default if we flag it as a known limit), but Tessa's call.
+**Interim shipped (2026-07-02):** default `LOOKBACK_HOURS` bumped **72h → 168h (7d)**. The window
+is unchanged in kind — still a fixed *rolling* `start = now − LOOKBACK_HOURS` — just wider. Tessa's
+call, and a good one: it captures **~80% of the value** of the fancier designs below for a one-line
+config change, keeps the window a **user-varyable knob** (the ideal range is genuinely role-dependent
+— an IC and a manager want different reaches), and avoids baking in non-obvious behaviour on an
+unproven assumption. **Known residual it does *not* fix:** a rolling window still *slides*, so an
+unaddressed @ still silently drops off the far edge after 7d — the original "did it drop, or did I
+handle it?" perception. 7d just makes that edge rarer/further back. The *anchor* (below) is what
+actually removes the slide.
 
-The fixed 72h lookback should be a **fallback**, not the curator. Direction Tessa
-wants: a **moving window anchored to the start of the week**, so a week's @s/tasks
-stay visible until cleared — and ideally **persistently track every unaddressed @**
-so nothing is silently dropped when it ages out, with the lookback only bounding how
-far back a *cold* scan reaches. **To discuss before building** — interacts with the
-stateless-window design (today a run reads nothing and re-derives the backlog) and
-with how items leave (reply/react/done). Quick phrasing fix shipped first
-(2026-06-18): the lookback label is now date-only.
+**The fuller design — considered in depth 2026-07-02, deliberately deferred.** Two separable ideas
+were on the table; keep both as pickups:
+
+- **(A) Stable weekly anchor** — instead of `now − N`, anchor the window *start* to a fixed weekday
+  boundary so it doesn't slide within a week. Settled shape (if we build it): **start = this week's
+  Monday 00:00 − 3 days = the preceding Friday 00:00, local time** — resets each Monday (bounded
+  backlog, clean "fresh week"), reaches back over the weekend + the Friday before (weekend @s can
+  matter), and stays fixed all week (kills the slide). **Deferred because:** it encodes a "people
+  clear within the week" assumption that may not fit every role, and the reset is *hidden* behaviour
+  (a knob is more legible for now). Cheap to build later (a pure `triageWindowStart(ref)` helper);
+  the 7d bump doesn't foreclose it.
+- **(B) Persistent tracking** — remember every unaddressed @ and keep surfacing it until *explicitly*
+  cleared (reply/react/`done`/`snooze`), with the time window only bounding a *cold* scan.
+  **Rejected for the R2 launch** (not just deferred): it would dump a **huge backlog** on a new
+  user's first digest (hostile onboarding for a "frictionless" bot), and read-but-never-cleared
+  false positives (the "sureee" closers) would **pile up forever** instead of self-cleaning by aging.
+  Tessa's counter that settles it: if an @ still matters, it gets **re-@'d / followed up**, so it
+  re-enters on its own — a week of silence is itself the signal it resolved or didn't matter. So the
+  time-window drop is *correct* behaviour here, not a trust breach.
+- **(parked idea) Behaviour-inferred urgency decay** — an item's urgency naturally *sags* toward
+  low as it goes unaddressed, then ages out. Elegant, but **too subjective to pin now** (how fast?
+  per-role? per-category?). Revisit once we have real usage signal; the current window is a clean
+  base to layer it onto.
+
+Also shipped earlier as a quick phrasing fix (2026-06-18): the lookback label is date-only.
 
 ### R9 — Org-signal triage: department + reporting-manager (low-priority / good-to-have, added 2026-07-02)
 
@@ -775,12 +954,22 @@ and generalise better than the hardcoded noise-name list (`isExcludedChatName`,
 
 ### R11 — Alert-channel urgency pass (low-priority / good-to-have, explore-first, added 2026-07-02)
 
-**The inverse risk of a deliberate decision.** Automated senders are dropped hard today —
-`--exclude-sender-type bot` at fetch **plus** the `{bot, app}` drop
-([fetchMentions.js:426](src/fetchMentions.js#L426)) and the noise-name list (`isExcludedChatName`,
-[config.js:105-110](src/config.js#L105-L110)) — all built to kill release/alert spam. But the
-canonical **HIGH** case (incident / outage / paging) very often arrives *from* a bot or app in an
-alert channel, so the blanket drop has a **false-negative hole exactly where urgency matters most**.
+**The inverse risk of a deliberate decision.** Automated senders are dropped hard — the
+`{bot, app}` in-code filter (`passesSenderFilter`, [fetchMentions.js](src/fetchMentions.js)) and the
+noise-name list (`isExcludedChatName`, [config.js](src/config.js)) — all built to kill release/alert
+spam. But the canonical **HIGH** case (incident / outage / paging) can arrive *from* a bot or app,
+so the blanket drop had a false-negative hole.
+
+**✅ Partly closed (2026-07-14):** a bot/app that **@mentions me directly in a group** is now **kept**
+(`passesSenderFilter` — the direct-@me carve-out), because a workflow/booster app naming me by open_id
+is a real ask. Live this rescued ~12 direct-@me app pings/7d (the activity-ops booster: refunds, failed
+issuance, same-day escalations) that the old blanket `--exclude-sender-type` drop was silently eating.
+This is the **stronger, cleaner rule** than the options below — structural (is my id in `mentions[]`?),
+no relevance heuristic, no cap needed.
+
+**Residual (still R11):** an incident a bot **broadcasts** to an alert channel with **no direct @me**
+still drops — the carve-out can't catch it (my id isn't in `mentions[]`). That's the firehose case, and
+the volume tension still applies to it.
 
 The tension is **volume** — those channels are firehoses (that's *why* they're dropped), so the fix
 can't be "stop dropping them"; it needs a relevance gate + cap or it reintroduces the noise we
@@ -796,10 +985,157 @@ removed. Approaches to weigh (not decided):
 
 **Consider before build** (Tessa, 2026-07-02) — needs design, not just a flag.
 
+### R12 — Beta scheduling & host: unattended digest, laptop-only (self-beta, added 2026-07-02)
+
+Run inlark for myself **unattended** — the digest arrives on a schedule and the bot's command
+listener stays up — without manually kicking off `npm run …`. Single-user (me) first; generalises
+to per-user under R2.
+
+**Host decision (2026-07-02): laptop-only, awake — no always-on host yet.** A closed-lid MacBook
+sleeps, so scheduled jobs don't fire and the `listen` WS drops. Workarounds were weighed and
+rejected for the beta: clamshell mode (needs a dock), `sudo pmset -a disablesleep 1` (admin —
+often blocked on a managed Mac — plus battery/thermal cost running in a closed bag), and
+`caffeinate` alone (does **not** override lid-close sleep). The VPN also drops the WS regardless
+(see memory). So the beta simply **runs only while my laptop is awake** — good enough to start
+trying it. The reliable always-on version is **deferred to R2 item (4)** ("always-on host for the
+event listener"); R12 is explicitly the stopgap before it. Use **`launchd`, not `cron`**: launchd's
+`StartCalendarInterval`/`StartInterval` **run a missed job on next wake**, which is exactly
+"when the laptop is awake" semantics; `cron` silently skips anything scheduled during sleep.
+
+**Cadence decision (2026-07-02): fire the digest on a fixed interval, default hourly — as a new
+user-facing env knob.** The stateless re-surfacing (every run re-pushes the current backlog — a
+run marks nothing read) is **not a concern here**: Tessa's incoming-message frequency means the
+card genuinely differs most hours, so no change-gate build — just push on the interval. Frequency
+is a **per-user env var** (people want different reaches) — e.g. `DIGEST_INTERVAL_MINUTES`
+(default 60). Daily start anchor **10:30am** (office arrival; was 8am).
+
+**Proposed architecture — fold the scheduler into the listener (one supervised process):** instead
+of a separate `cron`/`launchd` job racing the listener, have the **`listen` process self-trigger a
+digest on an internal interval** read from the env knob. This (a) makes frequency a true runtime
+var, (b) routes the scheduled digest through the **existing per-listener in-flight guard**, so a
+timer-fired digest and a manual `digest` can't overlap and trip Lark's `99991400` frequency limit
+(the separate-cron overlap risk), and (c) leaves **one** process for `launchd` to supervise —
+`RunAtLoad` + `KeepAlive` (start on login/wake, restart on crash) with a `ThrottleInterval` so
+rapid restarts don't themselves trip `99991400`. Delivery stays **self-chat (`SEND_AS=user`)** —
+works today, no bot provisioning; the bot surface is the R2 upgrade.
+
+**Open questions:**
+- **Start trigger:** launchd `StartCalendarInterval` at 10:30am vs. `RunAtLoad` on login/wake
+  (fires whenever I open the lid, incl. WFH). Login/wake is simpler and more "when I'm actually
+  working"; 10:30 is more predictable. Lean login/wake + RunAtLoad, revisit.
+- **Interval-knob shape:** a plain `DIGEST_INTERVAL_MINUTES` vs. a working-hours window (e.g. skip
+  8pm–8am) so it doesn't keep firing all night while the laptop's awake-but-idle. Start plain; add
+  a window later if the after-hours pushes annoy.
+- **Internal timer vs a 2nd launchd interval:** internal `setInterval` (env-driven, shares the
+  in-flight guard) is preferred over a separate launchd `StartInterval` for the reasons above —
+  confirm at build.
+- **Supervision UX:** how I see it's alive / restart it without an IDE (a `doctor`-style status? a
+  menubar item?) — matters more once it's meant to be unattended.
+
+**Not building yet — captured on Tessa's call (2026-07-02).** Graduates to the tracker when built.
+
+### R13 — In-Lark interactive triggers: refresh button + bot menu (added 2026-07-09)
+
+Today the only way to (re)trigger a run is typing `digest` (bot mode) or `npm run digest`
+(CLI). Tessa wants a **click-to-refresh** affordance — a button on the digest card — and asked
+whether Lark offers something more menu-like (à la Telegram's bot menu / button menus). It does;
+here's the landscape and the pick.
+
+**Lark's native trigger surfaces (how they map to "Telegram menus"):**
+- **(a) Card callback button** — a `button` on the digest card whose behavior is a **callback**
+  (not `open_url` like our Jump button), emitting a **`card.action.trigger`** event that carries a
+  `value` payload (e.g. `{action:"digest"}`). This is the "button after each digest" Tessa pictured:
+  contextual, **zero dev-console config**, reuses the existing digest pipeline.
+- **(b) Persistent bot menu** — a fixed menu configured on the bot in the **dev console** (Tessa's
+  side), shown at the bottom of the DM with the bot; a click emits an **`application.bot.menu_v6`**
+  event. The closest analog to Telegram's persistent menu: **always available, independent of scroll
+  position or which card is latest**. Good for "trigger from anywhere, anytime"; holds a few fixed
+  entries (Digest / Help). Can't reference card state, so it can't do a per-item `done 2`.
+- **(c) Slash / inline commands** — Lark has **no** third-party equivalent of Telegram's inline
+  slash-command system; (a) and (b) are the real options. (Noted so we don't hunt for a feature that
+  isn't there.)
+
+**Recommendation — start with (a), the card `↻ Refresh` button.** It's the ~80% win: contextual, no
+console config, and — the key point — it **rides the same card-callback plumbing R7 needs** (per-item
+done/snooze buttons). One spike unlocks both, so build the refresh button *alongside* R7, not as a
+separate effort. The **bot menu (b)** is the better "anytime" surface and — **confirmed by Tessa
+(2026-07-09) as the planned iterative improvement over (a)** — ships as a deliberate *second* step:
+card button first, then layer the menu on. It costs dev-console config + a *second* event type to
+consume/verify and couples to R2 (bot provisioning), so it's intentionally kept out of the first spike,
+not part of it.
+
+**⚠️ Shared gate with R7 — why this isn't independently "quick":** both (a) and (b) need **callback
+events over the lark-cli WS bus**, still listed as *unverified* — we consume only
+`im.message.receive_v1` today, and `done`/`snooze` are text commands for exactly this reason. So R13's
+button is **not a standalone quick add**; it's gated on R7's feasibility spike ("can we receive
+`card.action.trigger`?"). Prove that once and the refresh button, per-item done/snooze, and (with
+console config + the bot-menu event) the bot menu all become available together.
+
+**Design notes (once the spike passes):**
+- Button emits a callback → the listener routes `value.action === "digest"` to `runDigest`, reusing the
+  **in-flight guard** so a double-tap can't trip Lark's `99991400` frequency limit (same guard the text
+  `digest` uses today).
+- No message-patch API → a refresh **posts a fresh card** (like the `done`/`snooze` re-render), it
+  doesn't edit the old one in place. Tapping refresh on a *stale* card is harmless — the pipeline
+  re-fetches current state, so it's always "latest", never a replay.
+- The button does **not** "type digest for you" — it's a callback event, not a synthesized user message
+  (clarifying Tessa's "send digest" phrasing: the mechanism is an event, not text).
+- Ack UX: acknowledge the callback (toast / loading state) so the tap feels responsive while the burst runs.
+
+**Open questions:** does the lark-cli WS bus actually surface `card.action.trigger` /
+`application.bot.menu_v6` (the R7 spike answers the first)? user vs bot identity for the callback? does a
+bot-menu config force a re-publish / new scope (fold into R2's scope lock)? **Not building yet — captured
+on Tessa's call (2026-07-09); graduates to the tracker when the R7 spike lands.**
+
+### R14 — End-of-day "Catch Me Up" brief (good-to-have, added 2026-07-20)
+
+The LOW/FYI bucket is *real value*, not noise — cc's, @all's, routing notes, status updates: things
+Tessa doesn't have to **act** on but wants to **know**. Today they're correctly down-ranked (collapsed
+panel, per-item `FYI:` summaries), but the digest is optimised for *"what must I do"*, so across a day
+the awareness content piles into a long, un-synthesised LOW list and gets scrolled past. (The 2026-07-20
+"list every LOW item, no cap" change makes this sharper — nothing's hidden, but the tail is now longer.)
+Give that content its own home: a **once-a-day, glanceable "here's what happened around you" brief** —
+the digest's mirror image (*what to know* vs *what to do*), same actor-relative model, opposite end.
+
+**The distinction that makes it a separate artifact — synthesis, not a re-list.** The win is *not*
+"expand the LOW panel at 6pm." It's **distillation**: cluster the day's FYI into a few themed lines
+("2 warehouse routing notes; Project X shipped; 3 @all's — offsite RSVP, policy update, comp cycle"),
+each with a jump, instead of N verbatim rows. If it's the same list re-posted, it hasn't earned its
+place — a *briefing* is the point.
+
+**Pragmatic first cut (~80% value, no new deps):** an **on-demand `catchup` command** that takes the
+current LOW/FYI set (already fetched + classified + summary-cached by the digest pipeline) and posts
+**one synthesised brief card** — one extra synthesis call *over the cached per-item summaries*, so cheap.
+Ships today, **no host needed**, testable in self-chat like everything else.
+
+**Full version (rides R12):** scheduled **end-of-day auto-delivery** (~6pm, new knob) so it arrives
+unprompted. Depends on R12's host + interval plumbing — fold the daily brief in as a *second cadence*
+alongside the hourly digest (a daily timer beside the hourly one, same in-flight guard).
+
+**Design decisions / open questions:**
+- **Content scope (the key fork):** *only cc'd items* (Tessa's literal ask — narrowest; needs R5's cc
+  detection) vs. *the whole LOW/FYI bucket* (broader: cc + @all + routing + status). **Lean: whole
+  LOW/FYI bucket** — it's exactly "no action needed from me," which *is* the keep-me-informed set; cc is
+  just its most obvious member. **Confirm with Tessa.**
+- **Window:** the digest's 7d *rolling* window is wrong here — a daily brief wants **today only** (since
+  this morning) or **since the last catch-up**, else it re-briefs the same week every evening. A small
+  day-scoped variant on the lookback, *not* the stable-anchor debate (R8).
+- **Synthesis vs list:** cluster by theme / project / chat into a few lines, not one row per item. Costs
+  one extra Claude call over the cached summaries (cheap) — note for the R2 token budget.
+- **Composition with the digest:** complement, don't duplicate — the digest keeps its inline LOW panel
+  for same-run "why it's low" transparency; the brief is the end-of-day *synthesis*. **Forward idea (do
+  not decide now):** once the brief exists, the main digest *could* shed its long LOW tail and delegate
+  awareness to the brief — a real simplification, but only after the brief proves itself.
+- **Depends on:** R5 (cc detection, if we go cc-only) + R12 (host, for the scheduled cut). The on-demand
+  `catchup` cut depends on **neither** — build it first.
+
+**Not building yet — logged on Tessa's call (2026-07-20). Graduates to the tracker when built.**
+
 ---
 
 ## Out of scope (for now)
 
 True unread (blocked by Lark API — see the limitations table), in-place card
-editing, keyword filters (`digest urgent`), scheduled cron auto-delivery.
-*(Multi-user and "run without an IDE" are no longer out of scope — they're **R2**.)*
+editing, keyword filters (`digest urgent`).
+*(Multi-user and "run without an IDE" are **R2**; scheduled / fixed-interval auto-delivery is now
+**R12** — all no longer out of scope.)*

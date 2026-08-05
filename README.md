@@ -132,9 +132,11 @@ src/
   read in Lark.
 - **`done` / `snooze`** re-render from a cached snapshot of the last digest
   (`state.lastDigest`), so they're instant — no re-fetch or re-classify.
-- **Fixed window**: every run scans the last `LOOKBACK_HOURS` (default 72h / 3
+- **Fixed window**: every run scans the last `LOOKBACK_HOURS` (default 168h / 7
   days) for *currently-unread* items — running a digest doesn't read anything, so
   re-running re-surfaces the same backlog until you reply, `done`, or `snooze` it.
+  It's a *rolling* window, so items eventually slide off the far edge (a stable
+  weekly anchor is a parked follow-up — see the spec's R8).
 
 ## State (`state.json`, auto-created)
 

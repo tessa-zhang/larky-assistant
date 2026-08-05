@@ -9,8 +9,10 @@ import 'dotenv/config';
  */
 
 export const config = {
-  // Identity used to deliver the digest card. See .env.example.
-  sendAs: (process.env.SEND_AS || 'user').toLowerCase(),
+  // Identity used to deliver the digest card. Default `bot` — the R2 hosted
+  // surface (verified live 2026-08-04). `user` (self-chat) is deprecated, kept
+  // only as a manual CLI fallback. See .env.example.
+  sendAs: (process.env.SEND_AS || 'bot').toLowerCase(),
 
   // Claude model for classification.
   model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
@@ -18,8 +20,11 @@ export const config = {
   // Fixed lookback window for every run: each digest scans the last N hours for
   // CURRENTLY-unread mentions/DMs — independent of when you last ran it. Running
   // a digest does not mark anything read, so the unread backlog must persist
-  // across runs (cleared only by replying, `done`, or `snooze`). Default 72h (3d).
-  lookbackHours: Number(process.env.LOOKBACK_HOURS || (process.env.LOOKBACK_DAYS ? Number(process.env.LOOKBACK_DAYS) * 24 : 72)),
+  // across runs (cleared only by replying, `done`, or `snooze`). Default 168h (7d)
+  // — a week matches how most people keep their inbox clear; tune per role/taste.
+  // NB: this is a ROLLING window (start = now − N), so items still slide off the
+  // far edge as time passes; a stable weekly anchor is the parked follow-up (R8).
+  lookbackHours: Number(process.env.LOOKBACK_HOURS || (process.env.LOOKBACK_DAYS ? Number(process.env.LOOKBACK_DAYS) * 24 : 168)),
 
   // How far back to look for the user's own messages when building the reply
   // watermark (so a reply just before the digest window still counts as "read").
@@ -35,10 +40,6 @@ export const config = {
   maxMessages: Number(process.env.MAX_MESSAGES || 200),
 
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
-
-  // Max LOW/FYI items rendered on the card (high/medium always shown in full);
-  // the rest are summarised as "+N more". Keeps a busy digest readable.
-  lowDisplayLimit: Number(process.env.LOW_DISPLAY_LIMIT || 10),
 
   // Characters of the verbatim message shown beneath the AI summary on each card
   // item (≈2 lines on a wide card). The exact wording, so you can triage without
