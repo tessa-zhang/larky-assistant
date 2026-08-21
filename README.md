@@ -36,20 +36,20 @@ it from the terminal.
 
 ```bash
 SEND_AS=user        # default
-npm run digest      # fetch + classify + deliver card to your self-chat
+npm run inlark      # fetch + classify + deliver card to your self-chat
 npm run done -- 2 3 # mark items 2 and 3 done, re-render
 npm run snooze -- 1 # snooze item 1 for 24h, re-render
 ```
 
-### 2. Full bot path — `digest` keyword trigger
+### 2. Full bot path — `n` keyword trigger
 
-The bot replies in its DM thread when you type `digest`, and accepts `done N` /
-`snooze N` replies. Requires the console setup below, then:
+The bot replies in its DM thread when you type `n` (for "new"), and accepts
+`done N` / `snooze N` replies. Requires the console setup below, then:
 
 ```bash
 SEND_AS=bot
 npm run listen      # long-running WebSocket listener
-# then DM the bot in Lark: "digest"
+# then DM the bot in Lark: "n"
 ```
 
 ## Setup
@@ -90,10 +90,10 @@ When that succeeds, set `SEND_AS=bot` and run `npm run listen`.
 
 | Command | Action |
 |---|---|
-| `npm run digest` | Fetch currently-unread mentions+DMs (last 3 days), classify, deliver card |
+| `npm run inlark` | Fetch currently-unread mentions+DMs (last 7 days), classify, deliver card |
 | `npm run done -- <n…>` | Mark card items done (never reappear) |
 | `npm run snooze -- <n…>` | Hide items for `SNOOZE_HOURS` (default 24h) |
-| `npm run listen` | Bot mode: react to `digest` / `done` / `snooze` DMs |
+| `npm run listen` | Bot mode: react to `n` / `done` / `snooze` DMs |
 
 ## How it works
 

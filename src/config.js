@@ -125,3 +125,8 @@ export const URGENCY_META = {
   medium: { emoji: '🟡', label: 'MEDIUM' },
   low: { emoji: '🟢', label: 'LOW / FYI' },
 };
+
+// Bot/app items are grouped into their OWN section rather than into the urgency
+// buckets (2026-08-11) — an automated ping never sits among human asks, whatever it
+// classifies as. Same shape as URGENCY_META so the card renders the section the same way.
+export const BOT_SECTION_META = { emoji: '🤖', label: 'BOT / APP' };

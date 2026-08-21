@@ -8,7 +8,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "digest": "node src/index.js digest",
+    "inlark": "node src/index.js digest",
     "done": "node src/index.js done",
     "snooze": "node src/index.js snooze",
     "listen": "node src/index.js listen",

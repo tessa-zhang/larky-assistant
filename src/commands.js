@@ -1,7 +1,7 @@
 import { config, URGENCY_ORDER } from './config.js';
 import { sendMessage } from './lark.js';
 import { buildDigestCard } from './buildCard.js';
-import { fetchSince } from './fetchMentions.js';
+import { fetchSince, isAutomatedSender } from './fetchMentions.js';
 import { classify } from './classify.js';
 import { formatDate, MS_PER_HOUR } from './time.js';
 import * as store from './state.js';
@@ -17,9 +17,19 @@ async function deliver(delivery, content, msgType = 'text') {
   });
 }
 
-/** Sort by urgency (high→low) then most-recent, and assign 1..N. */
-function numberItems(items) {
+/**
+ * Sort into the card's reading order and assign 1..N (the numbers `done`/`snooze`
+ * reference), so numbering stays monotonic top-to-bottom:
+ *   1. **humans before bots/apps** — bot/app items live in their own bottom section
+ *      (2026-08-11), so this is the section split, not a tie-break;
+ *   2. urgency (high→low) within each side;
+ *   3. most-recent first.
+ * The bot section is deliberately ordered by urgency too, so its own HIGH sits on top.
+ */
+export function numberItems(items) {
   items.sort((a, b) => {
+    const bot = Number(isAutomatedSender(a)) - Number(isAutomatedSender(b));
+    if (bot !== 0) return bot;
     const u = (URGENCY_ORDER[a.urgency] ?? 9) - (URGENCY_ORDER[b.urgency] ?? 9);
     if (u !== 0) return u;
     return (b.createTime?.getTime?.() || 0) - (a.createTime?.getTime?.() || 0);
@@ -86,14 +96,25 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
     Object.assign(it, c);
     if (cacheOn && it.cacheKey) store.setCachedSummary(state, it.cacheKey, c); // reuse next run
   }
-  numberItems(items);
 
-  const card = buildDigestCard({ items, since: sinceDate, generatedAt: runAt, footerHint });
-  await deliver(delivery, card, 'interactive');
+  // NOTHING is filtered out of the card (2026-08-11, reverting the same-day action-only
+  // experiment): every fetched item is rendered. Humans keep their full HIGH / MEDIUM /
+  // LOW-FYI grouping (LOW collapsed behind the R3 panel, as before the experiment), and
+  // bot/app rows keep their own section — also at every urgency. The action-only filter
+  // dropped human `low` rows entirely; Tessa asked for them back, so the only structural
+  // change left from these sessions is the bot/human SPLIT, not any hiding. Keep it that
+  // way: `urgency: "low"` is once again purely an ordering/grouping signal, never an
+  // include/exclude gate, which is what makes a mis-classification recoverable rather
+  // than invisible. See SPEC "Digest card".
+  numberItems(items);
 
   // The bundle + cache bookkeeping were only needed for classification; drop them so
   // the snapshot done/snooze re-renders from stays lean (it keeps bundleType/threadTopic).
   for (const it of items) { delete it.bundle; delete it.cacheKey; }
+
+  const card = buildDigestCard({ items, since: sinceDate, generatedAt: runAt, footerHint });
+  await deliver(delivery, card, 'interactive');
+
   state.lastRunAt = runAt.toISOString();
   state.lastDigest = { generatedAt: runAt.toISOString(), since, items };
   await store.save(self.openId, state);

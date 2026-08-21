@@ -6,11 +6,12 @@ import { join } from 'node:path';
 
 import { relativeTime, formatDateTime, formatDate, MS_PER_HOUR } from '../src/time.js';
 import { isExcludedChatName, config } from '../src/config.js';
-import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, passesSenderFilter, jumpLink, parsePosition, threadCacheKey } from '../src/fetchMentions.js';
+import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, passesSenderFilter, isAutomatedSender, jumpLink, anchorFallback, parsePosition, threadCacheKey, SUMMARY_CACHE_VERSION } from '../src/fetchMentions.js';
 import { reactedIdsFromDetails } from '../src/lark.js';
 import { extractJson, systemPrompt } from '../src/classify.js';
 import { buildDigestCard, previewText } from '../src/buildCard.js';
 import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, getCachedSummary, setCachedSummary, pruneSummaryCache, load, save } from '../src/state.js';
+import { numberItems } from '../src/commands.js';
 
 const NOW = new Date('2026-06-16T12:00:00Z');
 
@@ -144,6 +145,114 @@ test('passesSenderFilter keeps humans + direct-@me bots, drops bot broadcasts & 
   assert.equal(passesSenderFilter({ senderType: 'app', isDM: true, isBroadcast: false }), false);
 });
 
+test('isAutomatedSender flags bot/app senders only', () => {
+  assert.equal(isAutomatedSender({ senderType: 'bot' }), true);
+  assert.equal(isAutomatedSender({ senderType: 'app' }), true);
+  assert.equal(isAutomatedSender({ senderType: 'user' }), false);
+  assert.equal(isAutomatedSender({ senderType: null }), false);
+});
+
+test('groupRows anchors a row to whoever ADDRESSED me, not whoever spoke last — a bot @ing later must not hijack a colleague\'s ask', () => {
+  const at = (h) => new Date(`2026-08-11T${String(h).padStart(2, '0')}:00:00Z`);
+  const m = (o) => ({ isDM: false, isBroadcast: false, threadId: 'omt_1', chatId: 'oc_1', position: null, ...o });
+
+  // Colleague @s me at 09:00; a workflow app @s the same thread at 11:00 (so it's latest).
+  const [row] = groupRows([
+    m({ messageId: 'om_h', senderName: 'Andre', senderType: 'user', text: 'Tessa can you approve the SG exception?', link: 'https://human', createTime: at(9), threadPosition: 1 }),
+    m({ messageId: 'om_b', senderName: 'Booster', senderType: 'app', text: 'Escalate warehouse issues to Tessa', link: 'https://bot', createTime: at(11), threadPosition: 2 }),
+  ]);
+  // The row is anchored to the HUMAN: sender/type (⇒ human section + no `· bot ·` label),
+  // the verbatim excerpt (the real ask, not the routing note) and the jump target.
+  assert.equal(row.senderName, 'Andre');
+  assert.equal(row.senderType, 'user');
+  assert.equal(isAutomatedSender(row), false);
+  assert.match(row.text, /approve the SG exception/);
+  assert.equal(row.link, 'https://human');
+  // The bot's message isn't lost — still a member (bundle summary + count) and its own @ line.
+  assert.equal(row.chatUnreadCount, 2);
+  assert.equal(row.mentionCount, 2);
+
+  // CONTROL 1: bot-only bundle stays anchored to the bot ⇒ still routed to the bot section.
+  const [botOnly] = groupRows([m({ messageId: 'om_b2', senderName: 'Booster', senderType: 'app', text: 'issuance retry', link: 'https://b2', createTime: at(10), threadPosition: 1 })]);
+  assert.equal(isAutomatedSender(botOnly), true);
+
+  // CONTROL 2: all-human bundle is unchanged — still the LATEST human message.
+  const [humans] = groupRows([
+    m({ messageId: 'om_h1', senderName: 'Andre', senderType: 'user', text: 'first', link: 'https://h1', createTime: at(9), threadPosition: 1 }),
+    m({ messageId: 'om_h2', senderName: 'Bella', senderType: 'user', text: 'second', link: 'https://h2', createTime: at(11), threadPosition: 2 }),
+  ]);
+  assert.equal(humans.senderName, 'Bella');
+  assert.equal(humans.text, 'second');
+});
+
+test('numberItems: EVERY human item sorts above every bot/app one (own section), urgency orders within each side', () => {
+  const humanHigh = { urgency: 'high', senderType: 'user', createTime: new Date('2026-06-16T09:00:00Z') };
+  const humanMed = { urgency: 'medium', senderType: 'user', createTime: new Date('2026-06-16T10:00:00Z') };
+  // A bot item that is BOTH the most urgent tier AND the most recent — it still sorts last,
+  // because bot/app items are a separate bottom section, not a tie-break within a tier.
+  const botHigh = { urgency: 'high', senderType: 'app', createTime: new Date('2026-06-16T11:00:00Z') };
+  const botLow = { urgency: 'low', senderType: 'bot', createTime: new Date('2026-06-16T08:00:00Z') };
+  const items = numberItems([botLow, botHigh, humanMed, humanHigh]);
+
+  // Humans first (high→medium), then bots (high→low) — matches the card's section order.
+  assert.deepEqual(items, [humanHigh, humanMed, botHigh, botLow]);
+  // A bot `high` sits BELOW a human `medium` — urgency is secondary to the human/bot split.
+  assert.ok(items.indexOf(botHigh) > items.indexOf(humanMed));
+  // Numbering runs monotonically down the card so done/snooze refs line up.
+  assert.deepEqual(items.map((it) => it.n), [1, 2, 3, 4]);
+});
+
+test('groupRows carries the bundle\'s STRONGEST directedness (fewest tagged), not the latest message\'s', () => {
+  const at = (h) => new Date(`2026-08-11T${String(h).padStart(2, '0')}:00:00Z`);
+  const m = (o) => ({ isDM: false, isBroadcast: false, senderType: 'user', threadId: 'omt_1', chatId: 'oc_1', position: null, ...o });
+
+  // A thread holding a near-1:1 ask (2 tagged, me 2nd) AND a later 28-person blast.
+  const [row] = groupRows([
+    m({ messageId: 'om_a', senderName: 'Andre', text: 'Tessa can you approve?', createTime: at(9), threadPosition: 1, taggedCount: 2, myTagPosition: 2 }),
+    m({ messageId: 'om_b', senderName: 'Bella', text: 'release notes', createTime: at(11), threadPosition: 2, taggedCount: 28, myTagPosition: 9 }),
+  ]);
+  // The personal ask is the salient fact about how I was addressed — not the blast.
+  assert.equal(row.taggedCount, 2);
+  assert.equal(row.myTagPosition, 2);
+
+  // Ties on count are broken by the earliest tag position.
+  const [tie] = groupRows([
+    m({ messageId: 'om_c', senderName: 'C', text: 'x', createTime: at(9), threadPosition: 1, taggedCount: 3, myTagPosition: 3 }),
+    m({ messageId: 'om_d', senderName: 'D', text: 'y', createTime: at(10), threadPosition: 2, taggedCount: 3, myTagPosition: 1 }),
+  ]);
+  assert.equal(tie.myTagPosition, 1);
+
+  // An @all-only bundle names nobody directly ⇒ no directedness figures to report.
+  const [bcast] = groupRows([
+    m({ messageId: 'om_e', senderName: 'E', text: 'hi all', createTime: at(9), threadPosition: 1, isBroadcast: true, taggedCount: 0, myTagPosition: null }),
+  ]);
+  assert.equal(bcast.taggedCount, null);
+  assert.equal(bcast.myTagPosition, null);
+});
+
+test('systemPrompt frames directedness as a weighable spectrum and explicitly de-weights tag position', () => {
+  const p = systemPrompt('Tessa');
+  assert.match(p, /tagged_count/);
+  assert.match(p, /my_tag_position/);
+  assert.match(p, /spectrum/i);          // a continuum, not a set of special cases
+  assert.match(p, /EVIDENCE, never as a rule/); // content always wins
+  assert.match(p, /WEAKEST/);            // position is explicitly the weak signal
+  assert.match(p, /5-person squad|200-person channel/); // judge relative to the chat, no absolute threshold
+  assert.match(p, /is_broadcast/);        // @all still handled, now as the spectrum's end
+});
+
+test('buildDigestCard shows an auditable directedness badge (you only / you N of M), never on a DM', () => {
+  const base = { n: 1, urgency: 'medium', category: 'question', summary: 's', senderType: 'user', chatName: 'c', senderName: 'A', text: 't', chatUnreadCount: 1, link: null, createTime: NOW };
+  const head = (item) => JSON.stringify(buildDigestCard({ items: [item], since: NOW, generatedAt: NOW }).body.elements);
+
+  assert.match(head({ ...base, isDM: false, taggedCount: 1, myTagPosition: 1 }), /🎯 you only/);
+  assert.match(head({ ...base, isDM: false, taggedCount: 5, myTagPosition: 2 }), /👥 you 2\/5/);
+  // A DM is 1:1 by construction — the badge would be noise.
+  assert.doesNotMatch(head({ ...base, isDM: true, taggedCount: 1, myTagPosition: 1 }), /🎯|👥/);
+  // An @all named nobody ⇒ no figures ⇒ no badge (the 📣 @all tag carries that instead).
+  assert.doesNotMatch(head({ ...base, isDM: false, isBroadcast: true, taggedCount: 0, myTagPosition: null }), /🎯|👥/);
+});
+
 test('reactedIdsFromDetails returns only messages I reacted to', () => {
   const details = [
     { message_id: 'om_1', message_reaction_items: [{ operator: { operator_id: 'ou_me' } }] },
@@ -171,8 +280,10 @@ test('jumpLink passes through working chat links, rebuilds broken thread links',
     'https://applink.larksuite.com/client/chat/open?openChatId=oc_b&position=7',
   );
 
-  // Pure in-thread reply: message_position is the "-3" sentinel → omit position;
-  // the rebuilt link just opens the chat (clickable, unlike the dead thread link). Host reused.
+  // Pure in-thread reply: message_position is the "-3" sentinel → no main-timeline
+  // position exists to anchor on, so the rebuilt link just opens the chat (bare —
+  // `&openThreadId=…` was tried live and confirmed a no-op, so it's gone; see
+  // jumpLink doc). anchorFallback can still rescue this at the bundle level.
   assert.equal(
     jumpLink({
       chat_id: 'oc_c', thread_id: 'omt_2', message_position: '-3', thread_message_position: '10',
@@ -180,6 +291,32 @@ test('jumpLink passes through working chat links, rebuilds broken thread links',
     }),
     'https://applink.feishu.cn/client/chat/open?openChatId=oc_c',
   );
+
+  // Position 0 is a REAL position (0-indexed) — must anchor exactly like any other
+  // real position, not fall through to the bare-chat branch.
+  assert.equal(
+    jumpLink({
+      chat_id: 'oc_d', thread_id: 'omt_3', message_position: '0',
+      message_app_link: 'https://applink.larksuite.com/client/thread/open?open_chat_id=oc_d&open_thread_id=omt_3',
+    }),
+    'https://applink.larksuite.com/client/chat/open?openChatId=oc_d&position=0',
+  );
+});
+
+test('anchorFallback rescues a positionless link with a real position found elsewhere in the thread; no-ops otherwise', () => {
+  // No real position on this message (a bare chat link) — rebuild anchored on the given position.
+  const bareLink = 'https://applink.larksuite.com/client/chat/open?openChatId=oc_a';
+  assert.equal(
+    anchorFallback(bareLink, 'oc_a', 5),
+    'https://applink.larksuite.com/client/chat/open?openChatId=oc_a&position=5',
+  );
+
+  // Already has a real position — leave it exactly alone (never override precision we have).
+  const preciseLink = 'https://applink.feishu.cn/client/chat/open?openChatId=oc_b&position=42';
+  assert.equal(anchorFallback(preciseLink, 'oc_b', 5), preciseLink);
+
+  // No link at all — nothing to rescue.
+  assert.equal(anchorFallback(null, 'oc_c', 5), null);
 });
 
 test('bundleKey routes by surface: DM, @all (never a thread), thread, plain group', () => {
@@ -380,6 +517,66 @@ test('buildDigestCard (R3) collapses ONLY low/FYI behind a panel; high/medium st
   assert.ok(!flat.includes('fyi note'));     // low summary is NOT at the top level
 });
 
+test('buildDigestCard renders EVERY urgency — a human low item is never filtered out of the card', () => {
+  // Regression guard for the reverted action-only experiment: `urgency: "low"` is an
+  // ordering/grouping signal, NOT an include/exclude gate. A human FYI must still ship.
+  const items = [
+    { n: 1, urgency: 'high', category: 'incident', summary: 'prod down', senderType: 'user', isDM: false, chatName: 'ops', senderName: 'Alice', text: 'checkout 500s', chatUnreadCount: 1, link: 'https://x', createTime: NOW },
+    { n: 2, urgency: 'low', category: 'fyi', summary: 'FYI: routing note — no action needed from you', senderType: 'user', isDM: false, chatName: 'warehouse', senderName: 'Bob', text: 'escalate to Tessa for warehouse', chatUnreadCount: 1, link: 'https://y', createTime: NOW },
+  ];
+  const els = buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements;
+  const all = JSON.stringify(els);
+  assert.match(all, /LOW \/ FYI/);
+  assert.match(all, /routing note/);                 // the low item is actually rendered
+  // Subtitle is a plain count — no stale "N FYI-only left out" claim.
+  assert.match(JSON.stringify(els[0]), /Showing \*\*2\*\* mentions & DMs/);
+  assert.doesNotMatch(all, /FYI-only left out/);
+  assert.doesNotMatch(all, /action item/);
+});
+
+test('buildDigestCard puts bot/app items in their OWN collapsed section, whatever they classified as', () => {
+  const items = [
+    { n: 1, urgency: 'high', category: 'incident', summary: 'prod down', isDM: false, senderType: 'user', chatName: 'ops', senderName: 'Alice', text: 'checkout 500s', chatUnreadCount: 1, link: 'https://x', createTime: NOW },
+    // A bot item classified HIGH must NOT appear in the human HIGH section.
+    { n: 2, urgency: 'high', category: 'decision_needed', summary: 'refund escalation', isDM: false, senderType: 'app', chatName: 'booster', senderName: 'Booster', text: 'escalation contact needed', chatUnreadCount: 1, link: 'https://y', createTime: NOW },
+    { n: 3, urgency: 'low', category: 'fyi', summary: 'issuance note', isDM: false, senderType: 'bot', chatName: 'ops-alerts', senderName: 'Bot', text: 'issuance retry', chatUnreadCount: 1, link: null, createTime: NOW },
+  ];
+  const top = buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements;
+
+  // Subtitle counts the HUMAN rows, and flags the bot count separately.
+  assert.ok(JSON.stringify(top[0]).includes('**1** mention'));
+  assert.ok(JSON.stringify(top[0]).includes('2 bot/app'));
+
+  // One collapsed panel: the bot section, holding BOTH bot items regardless of urgency.
+  const panels = top.filter((e) => e.tag === 'collapsible_panel');
+  assert.equal(panels.length, 1);
+  assert.equal(panels[0].expanded, false);
+  assert.ok(panels[0].header.title.content.includes('BOT / APP'));
+  assert.ok(panels[0].header.title.content.includes('(2)'));
+  const inPanel = JSON.stringify(panels[0].elements);
+  assert.ok(inPanel.includes('refund escalation')); // bot HIGH lives in the bot panel…
+  assert.ok(inPanel.includes('issuance note'));     // …alongside the bot LOW
+
+  // The human high item is flat at top level; neither bot item leaked out of the panel.
+  const flat = JSON.stringify(top.filter((e) => e.tag !== 'collapsible_panel'));
+  assert.ok(flat.includes('prod down'));
+  assert.ok(!flat.includes('refund escalation'));
+  assert.ok(!flat.includes('issuance note'));
+});
+
+test('buildDigestCard renders the bot section FLAT when there are no human items (a lone collapsed panel reads like the empty state)', () => {
+  const items = [
+    { n: 1, urgency: 'low', category: 'fyi', summary: 'issuance note', isDM: false, senderType: 'bot', chatName: 'ops-alerts', senderName: 'Bot', text: 'issuance retry', chatUnreadCount: 1, link: null, createTime: NOW },
+  ];
+  const top = buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements;
+
+  assert.equal(top.filter((e) => e.tag === 'collapsible_panel').length, 0); // not hidden behind a tap
+  const flat = JSON.stringify(top);
+  assert.ok(flat.includes('BOT / APP'));
+  assert.ok(flat.includes('issuance note'));
+  assert.ok(flat.includes('**0** mentions & DMs')); // honest: no human rows at all
+});
+
 test('buildDigestCard renders a sole LOW bucket flat + complete (no collapse, no cap)', () => {
   const lowCount = 15;
   const items = Array.from({ length: lowCount }, (_, i) => ({
@@ -396,14 +593,25 @@ test('buildDigestCard renders a sole LOW bucket flat + complete (no collapse, no
   assert.ok(!text.includes('more low/FYI'));  // no cap by default
 });
 
-test('buildDigestCard marks thread rows with a 🧵 and the thread topic', () => {
+test('buildDigestCard title is "<chat name> · <groupchat|DM|bot> · <Action|FYI>"', () => {
   const items = [
-    { n: 1, urgency: 'medium', category: 'question', summary: 'weigh in on rollout', isDM: false, bundleType: 'thread', threadTopic: 'staged rollout plan', chatName: 'eng', senderName: 'Dana', text: 'thoughts?', chatUnreadCount: 4, link: 'https://x', createTime: NOW },
+    { n: 1, urgency: 'high', category: 'decision_needed', summary: 'approve the budget', isDM: false, chatName: 'ops', senderName: 'Alice', text: 'sign off?', chatUnreadCount: 1, link: null, createTime: NOW },
+    { n: 2, urgency: 'medium', category: 'question', summary: 'reply when you can', isDM: true, chatName: 'Bob', senderName: 'Bob', text: 'got a sec?', chatUnreadCount: 1, link: null, createTime: NOW },
+    { n: 3, urgency: 'low', category: 'fyi', summary: 'fyi note', isDM: false, senderType: 'app', chatName: 'releases', senderName: 'Deploybot', text: 'v2 shipped', chatUnreadCount: 1, link: null, createTime: NOW },
   ];
   const text = JSON.stringify(buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements);
-  assert.ok(text.includes('🧵'));                 // thread marker
-  assert.ok(text.includes('staged rollout plan')); // topic disambiguates threads in the same chat
-  assert.ok(text.includes('+3 more'));            // chatUnreadCount 4 → +3 more
+  assert.ok(text.includes('ops · groupchat · Action'));   // non-fyi category → Action
+  assert.ok(text.includes('Bob · DM · Action'));           // DM, question is not fyi → Action
+  assert.ok(text.includes('releases · bot · FYI'));        // automated sender → bot; fyi category → FYI
+});
+
+test('buildDigestCard shows a "+N more" badge for unread counts beyond the first (no @you badge)', () => {
+  const items = [
+    { n: 1, urgency: 'medium', category: 'question', summary: 'weigh in on rollout', isDM: false, bundleType: 'thread', chatName: 'eng', senderName: 'Dana', text: 'thoughts?', chatUnreadCount: 4, link: 'https://x', createTime: NOW },
+  ];
+  const text = JSON.stringify(buildDigestCard({ items, since: NOW, generatedAt: NOW }).body.elements);
+  assert.ok(text.includes('+3 more')); // chatUnreadCount 4 → +3 more
+  assert.ok(!text.includes('🧵'));     // thread marker dropped from the title
 });
 
 test('buildDigestCard: multi-@ bundle gets a "N @you" badge + per-@ expander (top level only, no nesting)', () => {
@@ -449,10 +657,21 @@ test('threadCacheKey is stable for the same thread state and shifts when it chan
 test('threadCacheKey returns null (uncacheable) without a thread id or newest position', () => {
   assert.equal(threadCacheKey(null, 5, 1), null);
   assert.equal(threadCacheKey('omt_1', null, 1), null);
+  // Assert the key's STRUCTURE against the live version constant, not a literal prefix —
+  // the version is meant to change on every classifier-prompt edit, and a hardcoded
+  // 'v2|…' turns each of those into a spurious test failure.
+  const V = `v${SUMMARY_CACHE_VERSION}`;
   // A never-replied thread (no watermark) is still cacheable — key encodes "none".
-  assert.equal(threadCacheKey('omt_1', 5, null), 'v2|omt_1|5|none');
+  assert.equal(threadCacheKey('omt_1', 5, null), `${V}|omt_1|5|none`);
   // Position 0 is a REAL newest position (0-indexed), not "missing" — must cache.
-  assert.equal(threadCacheKey('omt_1', 0, 0), 'v2|omt_1|0|0');
+  assert.equal(threadCacheKey('omt_1', 0, 0), `${V}|omt_1|0|0`);
+});
+
+test('SUMMARY_CACHE_VERSION is baked into the key, so a prompt change orphans old verdicts', () => {
+  // The guard that stops a cached pre-change classification being served under a new
+  // prompt: every key carries the version, so bumping it misses every stale entry.
+  assert.ok(threadCacheKey('omt_1', 5, 1).startsWith(`v${SUMMARY_CACHE_VERSION}|`));
+  assert.equal(typeof SUMMARY_CACHE_VERSION, 'number');
 });
 
 test('summary cache stores and reuses a classification, refreshing recency on hit', () => {

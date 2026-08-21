@@ -4,8 +4,8 @@ import { config } from './config.js';
 import { getSelf } from './lark.js';
 import { runDigest, runDone, runSnooze } from './commands.js';
 
-const CLI_FOOTER = '↩ Run `npm run done 2` (or `-- all`) / `npm run snooze 1 3` · `npm run digest` to refresh';
-const BOT_FOOTER = '↩ Reply `done 2` (or `done all`) / `snooze 1 3` · type `digest` to refresh';
+const CLI_FOOTER = '↩ Run `npm run done 2` (or `-- all`) / `npm run snooze 1 3` · `npm run inlark` to refresh';
+const BOT_FOOTER = '↩ Reply `done 2` (or `done all`) / `snooze 1 3` · type `n` to refresh';
 
 // Lark API: app/identity is missing a required permission scope.
 const LARK_ERROR_MISSING_SCOPE = 99991672;
@@ -65,11 +65,11 @@ function summarizeSkips(s) {
 }
 
 /**
- * WebSocket listener: the bot receives DMs and reacts to `digest` / `done N` /
+ * WebSocket listener: the bot receives DMs and reacts to `n` / `done N` /
  * `snooze N`. Requires bot send scopes + a published app (see README).
  */
 async function cmdListen(self) {
-  console.log(`Listening for commands from ${self.userName} (DM the bot: "digest")… Ctrl+C to stop.`);
+  console.log(`Listening for commands from ${self.userName} (DM the bot: "n")… Ctrl+C to stop.`);
   const child = spawn('lark-cli', ['event', 'consume', 'im.message.receive_v1', '--as', 'bot'], {
     stdio: ['pipe', 'pipe', 'pipe'], // keep stdin open so the unbounded run doesn't EOF-exit
   });
@@ -108,9 +108,9 @@ async function cmdListen(self) {
     const delivery = { as: 'bot', chatId };
 
     try {
-      if (/^digest$/i.test(cmd)) {
+      if (/^n$/i.test(cmd)) {
         // A digest is a burst of Lark calls (watermark + mention + DM searches, then
-        // chat-name + reaction lookups). A second `digest` fired before the first returns
+        // chat-name + reaction lookups). A second `n` fired before the first returns
         // doubles that burst and trips Lark's rate limit (99991400). Ignore overlapping
         // triggers — the first run's "⏳ Fetching…" ack already signals it's working.
         if (digestRunning) { console.error('digest already running — ignoring duplicate trigger'); return; }

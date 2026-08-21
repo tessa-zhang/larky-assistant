@@ -129,6 +129,23 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       tail. Added **`done all`** to clear the whole delivered digest in one command — safe by
       construction (no cap ⇒ the snapshot equals what was shown, so nothing unseen is cleared). LOW
       volume stays bounded by `MAX_MESSAGES`. Config knob + `.env`/table refs removed; unit-tested.
+- [x] **Jump-link fix, pure in-thread replies** (bug, alpha feedback) *(2026-08-11)*: the 2026-06-18
+      jump-link fix only covered thread messages **mirrored to main** (a real `message_position` to
+      anchor `&position=…` on). Live check of a real thread (`omt_19176a7eb80f19ba`, 9 messages) found
+      **every message sentinel** (`message_position: -3`) — confirmed **no main-timeline position
+      exists anywhere in a pure in-thread conversation**, so the old fallback (bare `chat/open`, no
+      position) could only ever open the top of the chat — exactly the "jumps to the group, not the
+      message" alpha report. No officially documented applink opens a specific thread/message (checked
+      Feishu Open Platform docs — `/client/chat/open` only documents `openChatId`/`openId`; no
+      thread-open protocol is listed). Best-effort fix: append `&openThreadId=<thread_id>` (camelCase,
+      matching the known-working `openChatId` convention — Lark's own broken `/client/thread/open` link
+      carries the thread id, just mangled: snake_case + a lower-cased duplicate, never this casing) as
+      an ADDITIVE param on the proven `chat/open` base — a client that ignores it behaves exactly as
+      before (no regression risk), one that honours it opens the thread. **Unverified against the live
+      client** (no browser in this environment) — needs a real test-click on the next digest to confirm
+      before calling it fixed. Unit-tested (`jumpLink`); also fixed a latent bug where a real position-0
+      thread-mirror was wrongly omitted (`pos > 0` excluded a valid `0`; now uses `parsePosition`,
+      consistent with the 0-indexed convention used everywhere else).
 - [x] **Per-user state keying** (R2 multi-user) *(2026-07-20)*: state moved from a single shared
       `state.json` to **`state/<open_id>.json`** — done/snooze/digest-snapshot/summary-cache are now
       isolated per user, so one user's `done`/`done all` can never act on another's digest (the old
@@ -138,30 +155,144 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       gitignored (holds confidential booking data). Closes R2 remaining-item (2); the multi-tenant
       listener + per-user `--profile` reads (item 3) is the next piece. Unit-tested (per-user
       isolation) + path-traversal-safe.
+- [x] **🤖 Bot/app items get their own card section** (digest UX, alpha feedback) *(2026-08-11,
+      superseding the same-day within-tier tie-break)*: bot/app rows are pulled out of the urgency
+      buckets entirely and rendered in a **collapsed `🤖 BOT / APP` panel at the bottom of the card**,
+      with the count in the header. Every human item sorts above every bot one (`numberItems` keys on
+      the human/bot split *first*, then urgency, then recency), so an automated ping can't crowd a
+      human ask however it classifies. **Bot items bypass the action-only filter** — all of them show,
+      whatever urgency they got: they're mostly routing/FYI notes, so action-only was silently eating
+      nearly all of them, and Tessa's call was *"still display bot messages… just in its own category
+      for now, then we'll get user feedback."* So nothing bot-side goes missing, it's just penned in.
+      A lone bot section (no human items) renders **flat**, not collapsed — same escape hatch as LOW,
+      since a single collapsed panel reads like the empty state. Subtitle counts humans (`N action
+      items`) and flags `N bot/app` separately.
+      **The row is anchored to whoever ADDRESSED me, not whoever spoke last** — the critical correctness
+      piece (Tessa, 2026-08-11: *"we need to anchor it to the sender, not the bot who last replied to the
+      thread"*). A row's fields come from its **representative**, which was `pickLatest(members)`; in a
+      thread where a colleague @'d her and a workflow app @'d later, that's the *bot* — so the row would
+      be filed under bots, labelled `· bot ·`, and would show the app's routing note in place of the
+      colleague's real ask. New **`pickRepresentative`** ([fetchMentions.js](src/fetchMentions.js)): when
+      the latest member is automated **but a human directly @'d me in the same bundle**, anchor to the
+      **latest human direct-@me** instead. Section routing, the `· bot ·` label, the verbatim excerpt, the
+      jump target *and* the row's age then all follow from one correctly-chosen sender — so
+      `isAutomatedSender(row)` is the right question everywhere and there's **no second predicate to keep
+      in step** (an interim `isBotRow` that inspected `mentions[].senderType` was folded into this and
+      deleted). The bot's message isn't lost: it stays in `members` (counting toward the bundle summary +
+      unread count) and keeps its own line + jump in the per-@ expander. Same line as the 2026-07-14
+      sender-filter and 2026-07-02 noise-channel carve-outs: **a real person naming me always wins.**
+      Verified end-to-end through `groupRows` → card on the exact scenario (human @ 09:00, app @ 11:00 ⇒
+      row anchored to the human, human section, `· groupchat ·`, human's excerpt + link).
+      **Supersedes** the earlier same-day within-tier tie-break (`numberItems` sorting human-before-bot
+      *inside* a shared urgency tier, no separate section) — the separation makes it structural, so the
+      tie-break is gone rather than layered. Unit-tested (`pickRepresentative` via `groupRows` incl.
+      all-human + bot-only controls, `numberItems` ordering, both card renders).
+- [~] **Action-only digest — REVERTED same day** *(tried and rolled back 2026-08-11)*: for a few hours the
+      digest rendered **only** items needing action (`urgency !== 'low'`), leaving human LOW/FYI out of the
+      card entirely. Trigger was a real digest of **1 HIGH / 1 MEDIUM / 53 LOW** — the action signal drowned
+      by a 53-item panel. **Rolled back on Tessa's call the same day** (*"I notice our Low prio rows are
+      still gone — I want to bring that back… keep all the human tags high med low prio as usual, including
+      the FYI ones"*). ⇒ **nothing is filtered from the card now**; humans keep the full HIGH/MEDIUM/LOW
+      grouping (LOW collapsed behind the R3 panel, as before), bots keep their own section at every urgency.
+      The one structural change that survived from these sessions is the **bot/human split**, not any hiding.
+      **What the round taught us, kept:** (1) the real problem was *bot* volume, not LOW existing — the
+      bot section + Directedness address it without hiding anything; (2) making `urgency: low` an
+      include/exclude gate is fragile — it forced the classify fallback from `low`/`fyi` to
+      `medium`/`question` (else a missing `ANTHROPIC_API_KEY`, where *every* item falls back, would have
+      silently produced an empty digest) and it broke the "nothing is ever hidden, just collapsed" safety
+      net. Both are now restored: `low` is once again purely an ordering/grouping signal and the fallback is
+      `low`/`fyi` again. **If a filter on urgency is ever reintroduced, the fallback must change with it.**
+      Regression-guarded by a test asserting a human `low` row still ships. Also removed the now-false
+      `N FYI-only left out` subtitle + the dead `fyiCount` plumbing.
+- [x] **Thread jump-link anchor rescue** (bug fix, alpha feedback) *(2026-08)*: live-verified that many
+      threads never touch the main timeline at **all** (two real threads checked — 9 and 17 messages —
+      were 100% the `-3` sentinel, including the head), so the June jump-link fix's `&position=…` anchor
+      had nothing to attach to and the rebuilt link just opened the top of the chat — reported live as
+      "jumps to the group, not the message/thread." Tried `&openThreadId=<thread_id>` (additive,
+      camelCase to match `openChatId`) as a best-effort guess; **Tessa live-tested it against the bare
+      link and confirmed it's a no-op** — removed (see the updated limitations-table row). Real fix
+      shipped: `anchorFallback` reuses **any** real `message_position` found elsewhere in the *same*
+      fetched thread (a mix of mirrored + pure-in-thread messages) as the jump target for a message
+      that lacks its own — proven `chat/open`+`position` navigation, zero extra Lark calls (reuses the
+      bundle's existing thread fetch). Doesn't help a **fully**-virtual thread (nothing to anchor on
+      anywhere) or a gated-out lone thread message (thread never fetched) — those keep the honest bare
+      chat-open link; no known Feishu applink reaches a never-mirrored thread message precisely (treated
+      as an irreducible gap, same family as the other Lark blind spots in this doc). Unit-tested
+      (`anchorFallback` + updated `jumpLink` cases).
 
-**🔜 Next** (detail in [Roadmap](#roadmap)) — near-term sequence: **R2 launch**. (R8's interim
-7d bump shipped 2026-07-02; its fuller stable-anchor design is parked, not blocking.)
+- [x] **Trigger + script rename: `digest` → `n` / `npm run inlark`** (ergonomics) *(2026-08-11)*: the
+      bot's DM trigger is now a single keystroke **`n`** ("new") instead of typing `digest` — it's the
+      command reached for most often, several times a day, from a phone as much as a laptop. The npm
+      script is `npm run inlark` (the product name, not the subcommand). Card footers, the listener's
+      in-flight log line and the README were updated with it; the underlying CLI subcommand
+      (`node src/index.js digest`) is unchanged, so nothing internal renamed. R13's `↻ Refresh` button
+      would remove even this keystroke.
+- [x] **Directedness — tag breadth + position as classifier evidence** (triage accuracy, alpha
+      feedback) *(2026-08-11)*: generalises the direct-@me/@all binary into **one spectrum** — DM →
+      tagged alone → tagged with a couple → one of many → `@all` — using two new facts read off
+      `mentions[]`: **`taggedCount`** (how many people the message tagged) and **`myTagPosition`**
+      (my 1-based slot; Lark returns `mentions[]` in text order with an explicit `@_user_N` ordinal,
+      verified live). Both are passed to the classifier beside `is_broadcast` and framed as evidence
+      to weigh against the wording — **not** a sort key (Tessa's call): the model sees the sentence,
+      so it can separate "@Bob @me can you both look" from "@me please decide, @Bob fyi", and it can
+      lift a genuine 2-person ask *into* the digest, which is what matters under the action-only
+      digest. Ordering untouched (human/bot → urgency → recency).
+      **Evidence-based weighting:** measured on 14d/128 real messages, tag **breadth discriminates
+      well** (1–2 tagged ≈ genuine asks; 9–23 ≈ release notes / weekly reports / dashboards; tail
+      runs to 28, mode 5–6) but tag **position is confounded** — Tessa sits at position 2 in **47 of
+      94** direct @s (63% of automated ones) because `activity-ops` templates always list a colleague
+      first. So position is explicitly described to the classifier as the **weakest** signal rather
+      than made a rule, which would have demoted her in her busiest channel for reasons unrelated to
+      relevance. Row-level value is the bundle's **strongest** directedness (`strongestTag`), since a
+      thread can hold both a near-1:1 ask and a 28-person blast. Card shows an auditable badge
+      (`🎯 you only` / `👥 you 2/5`) so the classifier's use of the signal is checkable.
+      `SUMMARY_CACHE_VERSION` → **3** (v2 verdicts predate the signal). Scales with **no per-user
+      config, no absolute thresholds, no extra API calls, nothing persisted** — see **Directedness**.
+      Unit-tested (`strongestTag` via `groupRows`, prompt framing, badge incl. DM/@all suppression).
+
+**🔜 Next** (detail in [Roadmap](#roadmap)) — **R2 single-user bot is LIVE (2026-08-04);** the cohort
+build is now gated on an assessment. (R8's interim 7d bump shipped 2026-07-02; fuller stable-anchor design
+parked, not blocking.)
+- [ ] **R16 — Multi-user ROI vs privacy/security ASSESS** (⭐ HIGHEST PRIORITY, added 2026-08-05): go/no-go
+      gate before *any* R2 cohort build. lark-cli can't do multi-user, so it needs a **custodial per-user
+      token store** — weigh the ROI against the privacy/security burden of holding N users' refresh tokens +
+      message data. Output = a decision + architecture, **not code**. Nothing on the cohort proceeds until this lands.
+- [ ] **R17 — No user-identifiable data at rest** (privacy, added 2026-08-05): persist nothing back-traceable
+      to a user. Message/chat ids are opaque + content is auth-gated (lower risk); the real exposure is the
+      plaintext **sender names + AI summaries + open_ids** in `state/<open_id>.json`. Tension with the
+      done/snooze summary cache. Composes with R16.
 - [ ] **R2 — Hosted bot** (committed; the launch step after R3): frictionless, installable +
       runnable *without an IDE*, ideally entirely inside Lark. **Pre-launch token-guard gate:
       ✅ shipped + live-verified 2026-06-26** (per-thread summary cache, above). **Decisions
       (2026-06-24):** real **bot** delivery surface (not self-chat) + **curated** beta auth —
       named beta users authorize their own user token once via a link; self-serve in-Lark OAuth
-      is the fast-follow. **Auth mechanism settled (2026-06-26): device flow via lark-cli
-      profiles** — lark-cli is multi-user via `profile` (+ per-command `--profile`), so each user
-      gets a profile and lark-cli owns token storage/refresh; no custom OAuth server/token store
-      needed for the beta. (Code flow = the one-tap self-serve upgrade later; needs a public
-      redirect endpoint + our own token store + moving reads off lark-cli.)
+      is the fast-follow. **⚠️ Auth mechanism — original plan INVALIDATED (2026-08-05).** We had
+      "settled (2026-06-26)" on *device flow via lark-cli profiles — each user gets a profile,
+      lark-cli owns token storage/refresh, no custom token store needed for the beta.* **This does
+      not work.** Verified against lark-cli 1.0.51 + the `lark-shared` skill: (a) `profile add`
+      **rejects a duplicate app-id** — "each profile must have a unique app-id" — so you *cannot*
+      give each teammate a profile of the *same* inlark app; (b) lark-cli models a **single active
+      user per app** — `--as` picks the identity *type* (user/bot), not *which* user; there is **no
+      per-command user selector** and no active-user switch (`auth list` shows a `users[]` but nothing
+      routes to a chosen one). ⇒ **Multi-user is NOT achievable on lark-cli.** The **custom per-user
+      token store + code flow (reads off lark-cli, call Lark API directly with each user's token)** —
+      previously filed as a *"later self-serve upgrade"* — is therefore a **prerequisite for the R2
+      cohort**, not optional. Single-user (owner) runs fine on lark-cli today; the cohort build starts
+      here. Per-user device-flow *authorization* itself is fine — it's the multi-user *storage +
+      routing* lark-cli can't do.
       **✅ Bot UNBLOCKED + single-user loop proven (2026-06-26):** admin published/provisioned the
       bot on a **new app** `cli_aaaba7cf9a211ed1`; `bot_identity: pass`. User identity
       re-established on the new app via **device-flow login** (`auth login --no-wait` → approve QR
       → `--device-code`; granted `im`+`contact`+`search:message`+`offline_access`; new per-app
       open_id `ou_1e1aec…`). `npm run digest` verified end-to-end in **both** user-mode (self-chat,
       15 items) and **bot-mode** (the R2 surface — v2 card delivered, cache reused 1 summary at 0
-      tokens). **Remaining for R2:** the multi-user build — (1) bot-driven onboarding
-      (`p2p_chat_create` → Authorize card → per-user device-flow into a fresh profile),
+      tokens). **Remaining for R2:** the multi-user build — (0) **custom per-user token store + code
+      flow (reads off lark-cli)** — the newly-confirmed prerequisite (see the auth-mechanism note above;
+      lark-cli can't hold/route multiple users of one app), (1) bot-driven onboarding
+      (`p2p_chat_create` → Authorize card → per-user device-flow → **our token store**),
       (2) ✅ **per-user state (done/snooze/cache keyed by user) — shipped 2026-07-20**
       (`state/<open_id>.json`; see State section + tracker), (3) multi-tenant listener that routes
-      each user's `digest`/`done`/`snooze` to a run under their `--profile`, (4) an always-on host
+      each user's `digest`/`done`/`snooze` to a run under **their stored token**, (4) an always-on host
       for the event listener.
       **✅ RELAUNCHED on the least-privilege app (2026-08-04):** migrated off `cli_aaaba7cf9a211ed1` to a
       **from-scratch least-privilege app `cli_aacf7cc512b8ded2`** (new open_id `ou_566409…`). Locked
@@ -170,7 +301,9 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       delivered a live card (49 items; watermark skipped 361 read + 10 reacted), and inbound DM `hello`
       received over the bot. `SEND_AS` default flipped `user`→`bot`. Cost 4 approval rounds + a
       `base`-vs-`basic_profile` naming trap (see Least-privilege section). **Still remaining for R2:**
-      (1) bot-driven onboarding, (3) multi-tenant profile-routing listener, (4) always-on host — the cohort build.
+      (0) custom per-user token store + code flow (lark-cli can't do multi-user — confirmed 2026-08-05,
+      auth-mechanism note above), (1) bot-driven onboarding, (3) multi-tenant token-routing listener,
+      (4) always-on host — the cohort build.
 - [ ] **R12 — Beta scheduling & host** (self-beta, added 2026-07-02; near-term, precedes R2's
       always-on host): run the digest on a fixed interval (default hourly, new user env knob) and
       keep the command listener up **unattended while my laptop is awake** — the pragmatic stopgap
@@ -188,19 +321,29 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       a cc now reads as "named, not asked" → `low`; what's left is the explicit **`👀 cc` tag** +
       deterministic detection so the card shows *why* it's downranked): detect textual `cc @me`, tag +
       bias low (3rd lane alongside @all)
-- [ ] **R14 — End-of-day "Catch Me Up" brief** (good-to-have, added 2026-07-20): a once-a-day,
-      glanceable **synthesis** of the LOW/FYI bucket — the *"what happened around me"* mirror of the
-      digest's *"what must I do."* cc's / @all's / routing notes distilled into a few themed lines
-      (not re-listed) so awareness info doesn't get scrolled past. Pragmatic first cut = an on-demand
-      `catchup` command (no host dep); scheduled EOD delivery rides **R12**. See Roadmap R14.
+- [ ] **R14 — End-of-day "Catch Me Up" brief** (good-to-have — *briefly promoted then un-promoted
+      2026-08-11*; added 2026-07-20): a once-a-day, glanceable **synthesis** of the LOW/FYI bucket — the
+      *"what happened around me"* mirror of the digest's *"what must I do."* cc's / @all's / routing notes
+      distilled into a few themed lines (not re-listed) so awareness info doesn't get scrolled past.
+      **Back to good-to-have:** it was load-bearing for a few hours while the action-only digest hid human
+      LOW/FYI; that's reverted, so FYI content is visible on the card again and R14 is once more a
+      *synthesis* upgrade rather than the only home for anything. Its actual value never depended on the
+      experiment — the win is **distillation, not re-listing** (see Roadmap R14). First cut = an on-demand
+      `catchup` command (no host dep); scheduled EOD delivery rides **R12**.
 - [ ] **R7 — Interactive per-item done/snooze**: per-row buttons; `done` drops a ✅
       reaction so it survives without a global list (needs callback spike + R2)
 - [ ] **R13 — In-Lark interactive triggers** (added 2026-07-09; shares R7's card-callback spike):
-      a **`↻ Refresh` button on the digest card** to re-run without typing `digest`, and — optionally —
+      a **`↻ Refresh` button on the digest card** to re-run without typing `n`, and — optionally —
       a **persistent bot menu** as an always-available trigger. **Gated on the same unverified
       capability as R7**: callback events over the lark-cli WS bus (we consume only
       `im.message.receive_v1` today; `done`/`snooze` are text for exactly this reason). Build the
       button *with* R7's spike — one plumbing change unlocks both. Not building yet.
+      **Alpha feedback (2026-08-11):** asked for a "collapse" button at the bottom of the expanded
+      LOW/FYI panel. Checked Lark's `collapsible_panel` schema docs — there's **no `element_id` or
+      behavior type for one element to close another**; a panel only toggles via its own header tap.
+      A real bottom-collapse button needs exactly this spike (a `callback` button that re-renders the
+      card with `expanded: false`). **Decision: dropped, not building** — not worth the spike for this
+      alone; revisit only if R7/R13 happens for other reasons.
 - [ ] **R1 — Priority groups** (should-have, opt-in): surface/consider non-@
       messages from groups I designate as relevant
 - [ ] **R9 — Org-signal triage** (low-priority / good-to-have): weight urgency by the
@@ -214,6 +357,14 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       part shipped 2026-07-14**): the direct-@me-from-a-bot/app carve-out now rescues pings where a bot
       names me. **Residual:** a bot that *broadcasts* an incident to an alert channel with no direct
       @me still drops — that firehose case still needs a relevance filter + cap.
+- [ ] **R18 — Context-grouped digest** (to be evaluated, **premise live again**, added 2026-08-11): group
+      rows by **chat context** (project groups, DMs, ops/alert channels, …) then rank/highlight the top item
+      *within* each group, instead of urgency-only. Filed when the digest was **1 HIGH / 1 MEDIUM / 53 LOW**;
+      briefly moot while the action-only digest hid LOW, but that was reverted the same day so the flat low
+      list is back. **Materially shrunk though:** bot rows are now a separate section (41 of 94 direct @s
+      were apps) and Directedness feeds breadth to the classifier. **Next step is measurement, not design** —
+      count human LOW rows on a live run before committing; if still long, the cleanest form may be inside
+      **R14**'s synthesis rather than a second axis on the card. See Roadmap R18.
 
 ---
 
@@ -340,8 +491,62 @@ an **@all** never does (it only renders `@all`/`@_all` as text). So:
 all-hands posts matter) but are tagged **`📣 @all`** on the card and biased toward
 **low/fyi** at classification — they may only reach `medium` when they demand a
 concrete action from me (RSVP, form by a deadline) and `high` only for a genuine
-incident. The down-rank rides the existing LOW-bucket cap, so broadcast noise
-self-limits.
+incident.
+
+### Directedness — the generalised axis (2026-08-11)
+
+The direct-@me / @all split above is a **binary at the end of a continuum**. Two more
+facts read off the same `mentions[]` array place a message on that continuum:
+
+- **`taggedCount`** — how many people the message @mentioned in total. Fewer ⇒ more
+  personally addressed.
+- **`myTagPosition`** — my 1-based slot in the tag list (`null` when I'm not named
+  directly). Lark returns `mentions[]` in **text order** with an explicit `@_user_N`
+  ordinal, so this is real data (see the limitations table).
+
+⇒ one spectrum, most to least personal: **DM → tagged alone → tagged with a couple of
+others → one of many → `@all`**. `isBroadcast` is now simply its far end rather than a
+special case.
+
+**Measured on my real inbox (14d, 128 messages, 2026-08-11)** — the gradient is real and
+the breadth signal discriminates well: `taggedCount` 1–2 is dominated by genuine asks
+("there's a burst request from metasearch team", "can you please help"); 3–4 is team-level
+("dear team, please help Ops check this case"); 9–23 is almost entirely release notes,
+weekly TTI reports and WoW dashboards. The tail is long — tag counts of 16/18/20/23/28 all
+occur, and the mode is 5–6.
+
+**Weighting — breadth strong, position weak (evidence-based).** `myTagPosition` looked
+promising but measured out **confounded**: I sit at position **2 in 47 of 94** direct @s
+(63% of automated ones), because senders and templates repeat a roster order —
+`activity-ops` lists Windy Feng before me in *every* bucket from 3 to 18 tags. A
+"named first ranks higher" *rule* would therefore demote me in my busiest channel for
+reasons unrelated to relevance. So position is passed as evidence but explicitly
+described to the classifier as the **weakest** signal, to break otherwise-balanced calls
+only.
+
+**Wired as classifier evidence, not as a sort key** (Tessa's call, 2026-08-11). Both
+figures go into the classification input beside `is_broadcast`; the prompt frames them as
+a spectrum to weigh *against the sentence*, with "the sentence always wins" and "judge
+relative to the chat — a long tag list differs between a 5-person squad and a 200-person
+channel" (no absolute thresholds anywhere in code or prompt). **Ordering is untouched:**
+still human/bot → urgency → recency. Rationale for preferring the classifier over a
+deterministic tie-break: the model sees the actual wording, so it can separate
+"@Bob @me can you both look" from "@me please decide, @Bob fyi" — a distinction no sort
+key can make. It also means the signal can lift a genuine 2-person ask *into* the digest
+(which, under the action-only digest, is what actually matters), where a tie-break could
+only reorder items already shown.
+
+**Bundle rule:** a thread can hold both a near-1:1 ask and a 28-person blast, so a row
+carries its **strongest** directedness (`strongestTag` — fewest tagged, ties broken by
+earliest position), not the latest message's. The personal ask is the salient fact about
+how I was addressed.
+
+**Why this scales across the user pool** (the design constraint Tessa set): it is derived
+purely from data already fetched — **no per-user configuration or curation** (unlike R1
+priority groups), **no absolute thresholds** to calibrate per role, **no extra API calls**
+and ~2 small integers of extra prompt per item (negligible against the R2 multi-user token
+budget), and **nothing persisted** (so no R17 data-at-rest exposure). It degrades safely:
+no `mentions[]` ⇒ the fields are omitted and behaviour is exactly today's.
 
 ---
 
@@ -442,48 +647,125 @@ This **subsumes the old broadcast bias** (an @all is just the strongest "named, 
 asked" case — `is_broadcast` is still passed as a signal) and covers much of **R5** (a
 cc = named, not asked).
 
+**Directedness evidence (2026-08-11).** Alongside `is_broadcast`, each item carries
+**`tagged_count`** and **`my_tag_position`** (omitted when I wasn't named directly), and
+the prompt frames all three as one spectrum — DM / tagged-alone → short list → long list →
+`@all`. These are **evidence to weigh against the wording, never rules**: a 12-person
+thread saying "@Tessa please approve today" is still a real ask; a 2-person tag saying
+"fyi, closing this out" is still fyi. Tag position is explicitly labelled the **weakest**
+signal (it's confounded by roster/template ordering — see **Directedness**). This is the
+lever that lets a genuine 2-person ask reach `medium`/`high` and so appear at all under the
+action-only digest. Full rationale + the live measurements: **Directedness** section.
+
 **Category** — `incident` (prod broken/degraded), `decision_needed` (my approval or
 choice required), `review_request` (PRD/doc/code/design), `question` (I'm being asked
 something), `fyi` (informational only, or I'm only looped in).
 
 A chunked Claude call (`claude-sonnet-4-6`, ≤40 msgs/call, run concurrently) does the
-classification, with a `low`/`fyi` fallback so a message is never dropped on a parse
-error or when no API key is set. The per-thread **summary cache** is versioned
-(`SUMMARY_CACHE_VERSION`, [fetchMentions.js](src/fetchMentions.js)) so a classifier
-prompt change re-classifies rather than serving stale verdicts.
+classification, with a **`medium`/`question` fallback** so a message is never dropped on
+a parse error or when no API key is set. *(The fallback was `low`/`fyi` until 2026-08-11;
+once the digest started rendering only non-low items, a `low` fallback meant an unjudged
+message was **invisible** — and with no API key, every item fell back, silently emptying
+the whole digest. `medium` fails safe: "couldn't judge it ⇒ show it.")* The per-thread
+**summary cache** is versioned (`SUMMARY_CACHE_VERSION`,
+[fetchMentions.js](src/fetchMentions.js)) so a classifier prompt change re-classifies
+rather than serving stale verdicts.
 
 **Calibration — confirmed (Tessa, 2026-07-16)** — the reframe is aggressive by design,
 so the risk was over-demoting a politely-phrased real ask. Validated on the live card:
 the `medium` items were **genuinely her action items**, the booster routing-notes all
 sat in `low`, and — a deliberate UX win — the per-LOW **`FYI: <why it's low>`** summary
 reads as *assurance nothing's being missed* rather than a silent drop. Split is
-LOW-heavy but correct for her inbox. Residual safety net regardless: a mis-ranked item
-still appears (collapsed LOW) with verbatim + jump, so nothing is ever *hidden*. Lever
-if it ever over-fires later: soften the "Named ≠ asked" wording.
+LOW-heavy but correct for her inbox. Lever if it ever over-fires later: soften the
+"Named ≠ asked" wording.
+
+**`urgency: "low"` is NOT an include/exclude gate** — it groups and orders, nothing more.
+A `low` item still renders (collapsed LOW/FYI for humans, the bot panel for bots) with its
+verbatim + jump, so a mis-classification is always **recoverable, never invisible**. This
+is a deliberate standing constraint, not an accident: it was briefly violated by the
+action-only digest (2026-08-11, reverted same day), which also forced the classify fallback
+to `medium` because a keyless run would otherwise have produced an empty digest. Both are
+restored. **If urgency is ever made a visibility gate again, revisit the fallback and this
+safety net together.** (A prompt edit still needs a `SUMMARY_CACHE_VERSION` bump, as ever.)
 
 ---
 
 ## Digest card
 
-Lark interactive card. Grouped 🔴 HIGH / 🟡 MEDIUM / 🟢 LOW, **items numbered
-1..N globally** (numbers are how `done`/`snooze` reference items). One row per
-chat (latest unread). Each item:
+Lark interactive card. Sections in reading order: 🔴 **HIGH** / 🟡 **MEDIUM** (human,
+flat/expanded) → 🟢 **LOW/FYI** (human, collapsed behind the R3 panel) →
+🤖 **BOT / APP** (collapsed, see **Bot/app section**). **Nothing is filtered out** — every
+fetched item lands in one of those four buckets. **Items numbered 1..N globally**
+(numbers are how `done`/`snooze` reference items), and `numberItems` sorts to match the
+section order — humans before bots, urgency within each side, then recency — so numbering
+runs monotonically down the card. One row per chat/thread (latest unread). Each item:
 - label `[chat name]` for groups (falls back to `[sender · group]` until bot
   capability resolves names) or `[sender · DM]` for DMs, plus category, a
-  **`📣 @all`** tag when `isBroadcast`, relative time, and `· +N more` when the
-  chat has further unread messages;
+  **`📣 @all`** tag when `isBroadcast`, a **directedness badge** (`🎯 you only` when
+  nobody else was tagged, else `👥 you 2/5` = named 2nd of 5 — omitted on DMs and @alls;
+  2026-08-11), relative time, and `· +N more` when the chat has further unread messages;
 - the AI **summary** (what the sender needs from me);
 - the **verbatim message** beneath it — `💬 <sender>: "<excerpt>"`, truncated to
   `RAW_PREVIEW_CHARS` (≈2 lines) — so I can triage without opening the chat (which
   would mark it read);
 - a `↗ Jump to message` URL button.
 
-LOW/FYI **collapses** behind a `collapsible_panel` when HIGH/MEDIUM are present (R3) —
-but lists **every** low item inside (no display cap): each carries an assuring `FYI:`
-summary, so expanding shows the whole tail instead of "~10 + N more" with no way to act
-on the rest (2026-07-20). A sole LOW bucket renders flat. **`done all`** clears the
-whole digest at once (safe — with no cap the snapshot is exactly what's shown). Empty
-state → `✅ You're all caught up!`.
+**Human LOW/FYI is shown, collapsed (R3).** It lists **every** low item — no display cap —
+each with its assuring `FYI:` summary (2026-07-20), behind a `collapsible_panel` whose header
+carries the count. A sole LOW bucket (no HIGH/MEDIUM) renders **flat** instead, since a lone
+collapsed bucket reads like the empty state. **`urgency: "low"` is an ordering/grouping
+signal only — never an include/exclude gate**, which is what keeps a mis-classification
+recoverable (collapsed, but present with verbatim + jump) rather than invisible.
+*An **action-only** variant that dropped human `low` rows was tried and reverted the same day
+— see the tracker entry for what it taught us and the constraint it leaves behind.*
+
+**`done all`** clears the whole delivered digest at once — safe by construction, since
+`lastDigest.items` is exactly what was rendered and the card lists everything (LOW is only
+collapsed, its full contents reachable by expanding). Empty state → `✅ You're all caught up!`.
+
+**🤖 Bot/app section (2026-08-11).** Bot/app rows are grouped out of the urgency buckets
+into their own **collapsed panel at the bottom** (`BOT_SECTION_META`, count in the header),
+and **exempt from the action-only filter** — every bot item shows, whatever urgency it got.
+Rationale: automated pings are mostly routing/FYI notes, so action-only was eating nearly
+all of them; a separate pen keeps them visible without letting them crowd human asks
+(Tessa: *"still display bot messages… just in its own category for now, then we'll get user
+feedback"*). Ordered by urgency inside the panel, so a bot HIGH sits on top of its section
+— but still below every human item. When there are **no human items** the bot section
+renders **flat/expanded** instead (a lone collapsed panel reads like the empty state) and
+the subtitle honestly says `0 action items`.
+
+**A row is anchored to whoever ADDRESSED me, not whoever spoke last** — `pickRepresentative`
+([fetchMentions.js](src/fetchMentions.js)), and the correctness crux of this feature. A row's
+sender, verbatim excerpt, jump link, age and bot-vs-human classification all come from its
+**representative**, which used to be simply `pickLatest(members)`. In a thread where a
+colleague @mentioned me and a workflow app @'d later, the latest member is the *bot* — so the
+row would be filed under 🤖, labelled `· bot ·`, and would show the app's routing note where
+the colleague's actual ask should be. A genuine ask buried behind an automated one.
+
+⇒ when the latest member is automated **but a human directly @'d me in the same bundle**,
+anchor to the **latest human direct-@me** instead. Because every downstream decision reads
+the representative, one correct choice fixes routing, the label, the excerpt, the jump target
+and the timestamp together — and `isAutomatedSender(row)` becomes the right question
+everywhere, with **no second predicate to keep in step**. The bot's message is not lost: it
+stays in `members` (so it counts toward the bundle summary and unread count) and, being a
+direct @me, keeps its own line + jump inside the per-@ expander. Same principle as the
+2026-07-14 sender-filter and 2026-07-02 noise-channel carve-outs: **a real person naming me
+always wins.** Note the row's age becomes the *human ask's* age (an ask waiting 3 days reads
+as 3 days old, not as "1h ago" because a bot touched the thread) and `numberItems` sorts on
+that same timestamp.
+
+*(Two superseded same-day cuts, for history: (1) bot items stayed in the shared urgency buckets
+with `numberItems` tie-breaking human-before-bot **within** a tier — the separate section makes
+that structural, so the tie-break was removed rather than layered; (2) an `isBotRow(item)` helper
+that inspected `mentions[].senderType` to veto bot-routing — correct for routing but it left the
+label and excerpt still reading off the bot, so it was folded into `pickRepresentative` and
+deleted. Fixing the anchor at the source subsumed it.)*
+
+*(Pre-2026-08-11 behavior, superseded above but left here for history: human LOW/FYI
+**collapsed** behind a `collapsible_panel` when HIGH/MEDIUM were present (R3), listing
+**every** low item inside — no display cap — each with an assuring `FYI:` summary
+(2026-07-20). A sole LOW bucket rendered flat. That panel renderer is now shared with the
+bot section as `collapsedPanel`.)
 
 ---
 
@@ -537,9 +819,9 @@ file holds:
 
 - **Trigger / events:** `lark-cli event consume im.message.receive_v1` over the
   WebSocket long-connection — **no public webhook URL**. (Bot mode.)
-- **Commands:** in bot mode, DM the bot `digest` (case-insensitive) → it posts a
+- **Commands:** in bot mode, DM the bot `n` (case-insensitive) → it posts a
   loading ack (`⏳ Fetching your mentions…`) then the card; `done <n…>` /
-  `snooze <n…>` manage items. In CLI mode: `npm run digest | done | snooze | listen`.
+  `snooze <n…>` manage items. In CLI mode: `npm run inlark | done | snooze | listen`.
 - **All Lark calls:** shell out to `lark-cli`; it owns token storage + refresh.
 - **Send identity:** `SEND_AS=user` → digest to my **self-chat** (works today);
   `SEND_AS=bot` → bot replies in its DM (needs bot scopes + published version).
@@ -571,6 +853,7 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | Unread badge / count per chat | **Not exposed**; client-side only |
 | **My reactions on a message** | **Readable** ✅ — `reactions batch_query --as user` (cap 20 msgs/req, ≤10 reactions/msg); match `operator.operator_id` to my `open_id` |
 | Tell @all from a direct @mention | `--is-at-me` returns both; distinguish by whether my `open_id` ∈ `mentions[]` |
+| **`mentions[]` ordering + shape** | **Ordered, and the order is TEXT order** — each entry is `{ id, key, name }` with an explicit ordinal in `key` (`"@_user_1"`, `"@_user_2"`, …). Verified live 2026-08-11 against 14d/128 messages: a message reading `dear team @Windy @Tessa @Andrico` returns exactly `[Windy(@_user_1), Tessa(@_user_2), Andrico(@_user_3)]`. So "how many were tagged" and "where was I in the list" are both **real data**, not inferred — see **Directedness**. The array holds **only individually-named users**: a pure `@all` message returns **no `mentions[]` at all**, and a message mixing `@all` with individual tags lists only the individuals (so `mentions[]` can be non-empty while my id is absent — the existing `isBroadcast` test still holds). ⚠️ Order is *reliable* but not *meaningful* for machine-composed messages — automated Q&A/release cards repeat a fixed roster, which is why tag position is weighted weakest |
 | `--exclude-sender-type bot` scope | **Drops `app` too, not just `bot`** (verified 2026-07-14: the same 7d `--is-at-me` window returned 64 msgs without the flag vs 48 with — it removed exactly the 16 `app` msgs). It also can't inspect `mentions[]`, so it drops a bot/app **even when it @mentions me directly**. ⇒ don't use it on the mention search; filter senders in-code (`passesSenderFilter`) so a direct-@me workflow app survives |
 | Enumerate all my chats (`chat-list`) | Needs **Bot capability** activated (error `232025`) |
 | Resolve group chat names | Needs bot capability + `im:chat:readonly` |
@@ -580,7 +863,7 @@ No Lark secrets here — `lark-cli` owns Lark auth.
 | Patch/edit a sent card | No message-patch method → re-render + resend |
 | Card **schema 2.0** element support | `collapsible_panel` needs schema 2.0, but 2.0 **drops `note`** — a 2.0 card with a `note` is rejected (`200861 … unsupported tag note`). Use `markdown` for small/footer text; `hr`/`markdown`/`button` survive. Text is a standalone `markdown` element; buttons carry their URL via `behaviors:[{type:"open_url",default_url}]`, not a top-level `url`. (2026-06-24) |
 | Fetch a **full thread's** messages | `im +threads-messages-list --thread <omt_/om_> --sort asc\|desc` returns the same enriched shape as search (decoded `content`, real `thread_message_position`); `+chat-messages-list` does the same for a p2p/chat. **Gotcha:** `--help` advertises `page_size` 1–500, but the API really caps it at **50** — request more and it **silently returns 0 messages** (no error), so a naive whole-thread fetch fails open to nothing. Clamp to 50. (2026-06-24) |
-| Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+…) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, so fully reconstructable from `chat_id`+`message_position`) |
+| Jump to a **thread message** | `message_app_link` is a **malformed `/client/thread/open`** URL (duplicated, snake/lower-cased params: `open_chat_id`+`openchatid`+`open_thread_id`+`openthreadid`+`thread_position`) the client can't open → rebuild as `/client/chat/open?openChatId=…&position=…` (the working form; carries **no token**, fully reconstructable from `chat_id`+`message_position`). **Gap found 2026-08-11:** this only anchors messages **mirrored to main** (a real `message_position`) — a **pure in-thread reply has NO main-timeline position at all** (confirmed live on two real threads — a 9-message and a 17-message thread were both 100% sentinel, including the head), so the bare fallback just opened the top of the chat. **`&openThreadId=<thread_id>` tried and killed (2026-08):** appended additively (camelCase, matching the working `openChatId` convention) on the theory the client might read it even though Lark's own generated link never uses that casing — live-tested by Tessa, confirmed a **no-op**, byte-identical behavior to the bare link. Removed; don't re-add without a new signal. **No documented Feishu applink opens a specific never-mirrored thread message — treated as an irreducible gap**, same family as the other blind spots in this table. Partial mitigation shipped: `anchorFallback` (`fetchMentions.js`) rescues a positionless message by reusing **any** real `message_position` found elsewhere in the *same* fetched thread (a mix of mirrored + pure-in-thread messages) — real, proven `chat/open`+`position` navigation, just pointed at the nearest working spot; zero extra API cost (reuses the bundle's existing thread fetch). Doesn't help a **fully**-virtual thread (nothing to find) or a gated-out lone thread message (never fetched) |
 | Unread state of a **thread reply** | `message_position` is the `-3` sentinel for pure in-thread replies, so they're watermarked on **`thread_message_position`** (a real per-thread sequence) via the per-thread watermark — **shipped, R4**. Note: a thread message has *either* a real `message_position` (mirrored to main) *or* a real `thread_message_position` (pure in-thread), not reliably both — so a message with neither still surfaces once (residual). **Case B (fixed 2026-07-01):** a thread *root* / @mention that starts a thread comes back with a real `message_position` but **no** thread position; it was tested on the chat axis, so an in-thread reply (which only raises the thread watermark) never cleared it. Now: `threadId` + no thread position + real main position ⇒ read once a thread watermark exists for it. **Residual:** if lark-cli's `--sender` search doesn't return one of my in-thread replies, that thread's watermark is absent and its root still surfaces (clearable with `done`/reaction) — to watch |
 | Send **as bot** (`SEND_AS=bot`, the R2 surface) | Can fail `[11205] app do not have bot` **even when the dev console shows Bot enabled + all approved and local creds are valid** (`lark-cli doctor` → `app_resolved` pass, `bot_identity` warn). `auth status` showing bot "ready" is **misleading** — it means the token is *valid*, not that a bot is *provisioned*. Root cause by elimination (2026-06-24): **tenant provisioning** — the app/bot must be *installed / made available in the workspace* (a Lark-admin step), separate from dev-console enable+approve. Not fixable client-side; not a scope, secret, publish, CLI-version, or token-cache issue (all ruled out). Verify with `lark-cli doctor` (`bot_identity: pass`), not `auth status`. **Resolved 2026-06-26** — admin published/provisioned the bot on a **new app** (`cli_aaaba7cf9a211ed1`), so `bot_identity` flipped to `pass`; the user identity was then re-established on the new app via **device-flow login** (`auth login --no-wait` → approve QR → `--device-code`). NB: a new app ⇒ a **new per-app open_id** (auto-detected; don't pin `LARK_USER_OPEN_ID` to the old one) |
 | **Shrink an over-scoped user token via re-auth** | **Can't.** Lark *accumulates* prior consent — re-running `auth login --scope <subset>` while the app still *offers* the broad set returns the **full union**, not the subset (verified 2026-07-02: fresh `grantedAt`, byte-identical `scope` string, `Newly granted: (none)`). To narrow a token you must **remove the scopes at the app/console level** (the app-offered set is the ceiling; a fresh re-auth then mints a narrow token), or revoke the app in Lark's *user* security settings. `lark-cli auth logout` clears only the **local** token; re-login re-accumulates. ⇒ enforce least-privilege at the **app** layer, and verify **after** trimming. |
@@ -637,7 +920,7 @@ verify on the token (`auth status` scope count = 11, incl. `contact:user.basic_p
 
 ## Non-functional requirements
 
-- **On-demand only** — no polling; a run happens when I trigger `digest` (or `npm run digest`).
+- **On-demand only** — no polling; a run happens when I trigger `n` (or `npm run inlark`).
   *(Relaxed by **R12**: a scheduled interval may also fire the digest. Still not event-polling —
   it's a timed re-run of the same on-demand pipeline; nothing is marked read.)*
 - **Stateless window (by design)** — re-running re-surfaces the *same* current
@@ -797,6 +1080,14 @@ classification (only reaching higher when it genuinely asks something of me).
   flag for the tag + a prompt nudge, mirroring `is_broadcast`.
 - **Complement (R14):** the cc/FYI content R5 down-ranks is exactly what the end-of-day
   **Catch Me Up** brief surfaces *positively* — R5 detects/tags it, R14 gives it a home.
+- **Shrunk further by Directedness (2026-08-11):** a cc is nearly always a *long* tag list,
+  and `taggedCount`/`myTagPosition` now put exactly that on the classifier's desk — so the
+  down-ranking half of R5 is largely covered a second time (first by actor-relative urgency
+  2026-07-16, now by breadth). What's genuinely left is only the **explicit `👀 cc` tag** on
+  the card — a transparency nicety, not an accuracy fix. Note the precedent this sets for the
+  open question above: Directedness deliberately went *classifier-evidence, not deterministic
+  rule*, for a signal with far cleaner structure than a textual `cc`. Reach for the heuristic
+  flag here only if the card tag is the actual goal.
 
 ### R6 — Multi-message summary across the unread bundle (should-have; sharpened 2026-06-23, NEXT UP)
 
@@ -1013,7 +1304,7 @@ is a **per-user env var** (people want different reaches) — e.g. `DIGEST_INTER
 of a separate `cron`/`launchd` job racing the listener, have the **`listen` process self-trigger a
 digest on an internal interval** read from the env knob. This (a) makes frequency a true runtime
 var, (b) routes the scheduled digest through the **existing per-listener in-flight guard**, so a
-timer-fired digest and a manual `digest` can't overlap and trip Lark's `99991400` frequency limit
+timer-fired digest and a manual `n` can't overlap and trip Lark's `99991400` frequency limit
 (the separate-cron overlap risk), and (c) leaves **one** process for `launchd` to supervise —
 `RunAtLoad` + `KeepAlive` (start on login/wake, restart on crash) with a `ThrottleInterval` so
 rapid restarts don't themselves trip `99991400`. Delivery stays **self-chat (`SEND_AS=user`)** —
@@ -1036,7 +1327,7 @@ works today, no bot provisioning; the bot surface is the R2 upgrade.
 
 ### R13 — In-Lark interactive triggers: refresh button + bot menu (added 2026-07-09)
 
-Today the only way to (re)trigger a run is typing `digest` (bot mode) or `npm run digest`
+Today the only way to (re)trigger a run is typing `n` (bot mode) or `npm run inlark`
 (CLI). Tessa wants a **click-to-refresh** affordance — a button on the digest card — and asked
 whether Lark offers something more menu-like (à la Telegram's bot menu / button menus). It does;
 here's the landscape and the pick.
@@ -1087,15 +1378,27 @@ console config + the bot-menu event) the bot menu all become available together.
 bot-menu config force a re-publish / new scope (fold into R2's scope lock)? **Not building yet — captured
 on Tessa's call (2026-07-09); graduates to the tracker when the R7 spike lands.**
 
-### R14 — End-of-day "Catch Me Up" brief (good-to-have, added 2026-07-20)
+### R14 — End-of-day "Catch Me Up" brief (good-to-have; added 2026-07-20)
 
 The LOW/FYI bucket is *real value*, not noise — cc's, @all's, routing notes, status updates: things
-Tessa doesn't have to **act** on but wants to **know**. Today they're correctly down-ranked (collapsed
-panel, per-item `FYI:` summaries), but the digest is optimised for *"what must I do"*, so across a day
-the awareness content piles into a long, un-synthesised LOW list and gets scrolled past. (The 2026-07-20
-"list every LOW item, no cap" change makes this sharper — nothing's hidden, but the tail is now longer.)
+Tessa doesn't have to **act** on but wants to **know**. The digest is optimised for *"what must I do"*,
+so across a day the awareness content piles up un-synthesised and gets scrolled past.
 Give that content its own home: a **once-a-day, glanceable "here's what happened around you" brief** —
 the digest's mirror image (*what to know* vs *what to do*), same actor-relative model, opposite end.
+
+**Promotion history (2026-08-11, both directions in one day — don't re-litigate):** promoted to
+load-bearing when the **action-only digest** hid human LOW/FYI, making this its only planned surface; then
+**un-promoted** when that was reverted hours later at Tessa's request (*"bring that back"*). FYI content is
+visible on the card again, so R14 is back to what it always actually was: a **synthesis** upgrade, valuable
+on its own merits and blocking nothing. Tessa's framing while the experiment was live — *"it could fit in
+with the catch me up brief for the rest of the FYI stuff"* — still describes the intent well; it just isn't
+a dependency. Useful residue: the digest already computes and renders the full low set, so the first cut
+remains mostly wiring rather than new machinery.
+
+**Scope note:** the **🤖 bot/app section** renders all bot items on the digest card, so bot routing notes
+are already visible there. Whether the brief should *also* absorb them is open — a real possibility if the
+bot panel turns out to be too prominent once Tessa's feedback lands, which would narrow the digest and give
+this brief more to do.
 
 **The distinction that makes it a separate artifact — synthesis, not a re-list.** The win is *not*
 "expand the LOW panel at 6pm." It's **distillation**: cluster the day's FYI into a few themed lines
@@ -1106,7 +1409,9 @@ place — a *briefing* is the point.
 **Pragmatic first cut (~80% value, no new deps):** an **on-demand `catchup` command** that takes the
 current LOW/FYI set (already fetched + classified + summary-cached by the digest pipeline) and posts
 **one synthesised brief card** — one extra synthesis call *over the cached per-item summaries*, so cheap.
-Ships today, **no host needed**, testable in self-chat like everything else.
+Ships today, **no host needed**, testable in self-chat like everything else. *(2026-08-11: the low set is
+now computed and discarded on every digest run — `runDigest` filters it out right after classification —
+so this cut is close to just "don't throw it away, render it.")*
 
 **Full version (rides R12):** scheduled **end-of-day auto-delivery** (~6pm, new knob) so it arrives
 unprompted. Depends on R12's host + interval plumbing — fold the daily brief in as a *second cadence*
@@ -1122,14 +1427,96 @@ alongside the hourly digest (a daily timer beside the hourly one, same in-flight
   day-scoped variant on the lookback, *not* the stable-anchor debate (R8).
 - **Synthesis vs list:** cluster by theme / project / chat into a few lines, not one row per item. Costs
   one extra Claude call over the cached summaries (cheap) — note for the R2 token budget.
-- **Composition with the digest:** complement, don't duplicate — the digest keeps its inline LOW panel
-  for same-run "why it's low" transparency; the brief is the end-of-day *synthesis*. **Forward idea (do
-  not decide now):** once the brief exists, the main digest *could* shed its long LOW tail and delegate
-  awareness to the brief — a real simplification, but only after the brief proves itself.
+- **Composition with the digest — still as originally written, after a round trip.** The digest keeps its
+  inline collapsed LOW panel (same-run "why it's low" transparency, per-item `FYI:` summaries) and the
+  brief adds end-of-day *synthesis* on top. "Digest sheds its LOW tail and delegates awareness to the
+  brief" was filed here as a *forward idea — do not decide now, only after the brief proves itself*; it
+  was then tried out of order on 2026-08-11 (action-only digest, shed **before** the brief existed) and
+  **reverted the same day**. So the original sequencing stands, now with evidence behind it: **don't shed
+  the LOW tail until the brief is real and proven.**
 - **Depends on:** R5 (cc detection, if we go cc-only) + R12 (host, for the scheduled cut). The on-demand
   `catchup` cut depends on **neither** — build it first.
 
 **Not building yet — logged on Tessa's call (2026-07-20). Graduates to the tracker when built.**
+
+---
+
+### R16 — Multi-user ROI vs privacy/security assessment (ASSESS-first; **HIGHEST PRIORITY**, added 2026-08-05)
+
+**A gate before *any* R2 cohort build.** lark-cli can't do multi-user (confirmed 2026-08-05 — see the R2
+auth-mechanism note), so multi-user *requires* inlark to become the **custodian of every user's OAuth token**
+(long-lived + refreshable) and to read their Lark messages directly via the API. Before committing to build
+that (R2 item 0: token store + code flow), **assess whether the multi-user ROI justifies the privacy/security
+burden**:
+- **Liability:** a custodial token store = breach blast-radius of read access to *N* users' inboxes; we'd hold
+  employee-comms metadata + high-value refresh tokens.
+- **Consent / compliance:** storing + processing colleagues' message data at scale, vs. one owner reading only
+  their own inbox today.
+- **Alternatives:** single-user-per-instance (each teammate self-hosts), a thinner architecture, or not doing
+  hosted multi-user at all.
+- **Output:** a go/no-go + chosen architecture — **not code**. Nothing on the cohort build proceeds until this lands.
+
+### R17 — No user-identifiable data at rest (privacy / data-minimization, added 2026-08-05)
+
+**Requirement:** inlark should persist **nothing back-traceable to a user**. Audit + minimize what state stores.
+- **Today** `state/<open_id>.json` holds: `open_id` (the filename), `sender` display names, AI `summary`
+  (plaintext who + what), `message_id` / `chat_id` / `link`, timestamps.
+- **Findings (2026-08-05):** message/chat ids are opaque and **message content is auth-gated** — a user's token
+  cannot resolve *another* user's message via the id (verified), so the ids are the *lower*-risk part. The real
+  exposure is the **plaintext sender names + AI summaries + open_ids** — readable straight off disk, no Lark auth needed.
+- **Tension:** those summaries are the cache that makes `done`/`snooze` instant (the R2 pre-launch token guard) —
+  minimizing them costs a re-fetch + re-classify.
+- **Options to weigh:** hash/opaque the open_id filename, drop sender names (re-resolve at render), encrypt at rest,
+  store ids-only + re-derive, or keep the summary cache in-memory only.
+- **Composes with R16** — a custodial multi-user token store raises this same question at much higher stakes.
+
+### R18 — Context-grouped digest (to be evaluated, not urgent, added 2026-08-11)
+
+**Trigger:** alpha feedback (2026-08-11) — Tessa's digest is now **1 HIGH / 1 MEDIUM / 53 LOW**. The
+actor-relative classifier (the "Named ≠ asked" rule, see AI classification section above) is doing its
+job — most named-but-not-asked items genuinely are LOW *for her* — but the side effect is a digest that's
+mostly one big undifferentiated LOW panel, which "isn't very usable." Urgency alone is proving too coarse
+a *sole* primary axis at this skew.
+
+**Idea:** cross-cut urgency with **chat context**. Group rows by a context bucket — e.g. project groups, DMs,
+ops/alert channels — and within each bucket, rank/highlight the top-priority item(s), instead of (or
+alongside) one global HIGH/MEDIUM/LOW split. The pitch: even inside a 53-item LOW pile, "here's the one
+thing that stands out in your ops channel" is more scannable than a flat list.
+
+**Relationship to R1:** different axis of the same "chats beyond bare @mentions" space — **R1** widens
+*input* (consider non-@ messages from designated priority groups); **R18** restructures *output* (how
+already-surfaced rows are grouped/displayed). Likely compose well together but are independent asks.
+
+**Open questions (unresolved — assess before building; smallest-change-first is the house style here):**
+- **How is "context" derived?** A manual user-curated mapping (chat_id/name → category, opt-in like R1),
+  a name-pattern heuristic (already have `isExcludedChatName`-style matching for noise channels — could
+  extend the same idea), or an AI-inferred category per chat? Each has a different setup cost.
+- **DMs as a context bucket, or their own thing?** DMs today already read as clearly separate from group
+  @s on the card (`[sender · DM]` label) — is a "DMs" bucket redundant with that, or does it still help?
+- **Does this fix the root complaint, or just rearrange it?** If ops-channel noise itself is the real
+  driver of the 53-LOW pile, a relevance filter/cap (R11's residual) might address more of the actual pain
+  for less structural change — worth checking before committing to a two-axis card layout.
+- **Card complexity:** Lark's card schema — can it nest context buckets *and* the existing LOW
+  `collapsible_panel` cleanly, or does one replace the other?
+
+**Premise: defused, then RESTORED, same day (2026-08-11) — read this before assuming it's dead.** Hours
+after filing, the **action-only digest** removed the LOW panel entirely and this item looked moot; that
+was **reverted the same day**, so the collapsed LOW/FYI panel is back and with it the original complaint:
+a long, flat, undifferentiated low list. **R18 is live again.**
+
+What *did* change permanently, and shrinks it: bot/app rows now live in their **own section**, and on
+Tessa's real 14d window **41 of 94** direct @s were from apps — a large share of the old LOW pile is now
+penned separately rather than mixed into it. **Directedness** also gives the classifier a breadth signal
+that should pull genuinely-broadcast items down and real asks up. So the honest position is: the *shape*
+of the problem (flat low list) survives, but its *size* is materially reduced and the remaining volume
+hasn't been re-measured since. **Re-measure before designing** — count the human LOW rows on a live run
+now that bots are split out and Directedness is in the prompt. If that list is short, this stays parked;
+if it's still long, the context-grouping idea is the natural next step, and its cleanest form may still be
+inside **R14**'s synthesis (clustering by theme/project/chat is already R14's core mechanic) rather than as
+a second axis on the digest card.
+
+**Status:** parked pending that re-measurement. No design chosen — this entry records the trigger, the
+round trip, and what to check first.
 
 ---
 

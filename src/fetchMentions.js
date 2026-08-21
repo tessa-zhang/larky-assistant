@@ -57,24 +57,41 @@ export function passesSenderFilter(item) {
   return !item.isDM && !item.isBroadcast;
 }
 
+/** Is this item's (representative) sender a bot/app, not a human? See AUTOMATED_SENDER_TYPES. */
+export function isAutomatedSender(item) {
+  return AUTOMATED_SENDER_TYPES.has(item.senderType);
+}
+
 /**
  * The deep link for the Jump button. Lark gives every message a
  * `message_app_link`, but for THREAD messages that link is a malformed
  * `/client/thread/open` URL — duplicated, snake/lower-cased params (`open_chat_id`,
  * `openchatid`, `open_thread_id`, …) that Lark's own client can't parse, so the
  * button is dead. Non-thread messages get a `/client/chat/open?openChatId=…&position=…`
- * link that works and carries NO token, so for thread messages we rebuild that
- * working form from the message's own chat_id (+ position when it's a real
- * main-timeline sequence; pure in-thread replies report the "-3" sentinel, so we
- * omit it and the button just opens the chat). See SPEC.md "Lark API limitations".
+ * link that works and carries NO token, so for thread messages we rebuild from the
+ * message's own chat_id:
+ *   - **Mirrored to main** (real `message_position`): anchor on `&position=…`, exactly
+ *     like a non-thread message — exact, verified working.
+ *   - **Pure in-thread reply** (the "-3" sentinel — confirmed live to be the common
+ *     case; a whole thread can be ALL-sentinel with no main position anywhere): there
+ *     is no main-timeline position to anchor on at all, so the rebuilt link just opens
+ *     the chat (the "jumps to the group, not the message" report) — the ceiling of
+ *     what's reachable here. **Tried and killed live (2026-08):** appending
+ *     `&openThreadId=…` (matching the working `openChatId` convention) to see if it'd
+ *     land in the thread — confirmed no-op, identical to the bare chat link, so it's
+ *     not worth the extra param. `anchorFallback` (buildThreadBundle) still rescues
+ *     this with a real position when the bundle's thread fetch turns one up elsewhere
+ *     in the SAME thread (a mix of mirrored + pure-in-thread messages) — that path is
+ *     real, verified navigation, not a guess.
+ * See SPEC.md "Lark API limitations".
  */
 export function jumpLink(msg) {
   const original = msg.message_app_link || null;
   if (!msg.thread_id || !msg.chat_id) return original; // non-thread link already works
   const host = (/^https?:\/\/[^/]+/.exec(original || '') || [])[0] || 'https://applink.larksuite.com';
-  const pos = parseInt(msg.message_position, 10);
-  const posParam = pos > 0 ? `&position=${pos}` : '';
-  return `${host}/client/chat/open?openChatId=${encodeURIComponent(msg.chat_id)}${posParam}`;
+  const pos = parsePosition(msg.message_position);
+  const chatUrl = `${host}/client/chat/open?openChatId=${encodeURIComponent(msg.chat_id)}`;
+  return pos != null ? `${chatUrl}&position=${pos}` : chatUrl;
 }
 
 /**
@@ -109,9 +126,11 @@ export function parsePosition(raw) {
  */
 // Bump when the classifier PROMPT changes: cached summaries store the OLD prompt's
 // urgency/category/summary, so a version tag in the key orphans the stale entries
-// (they age out via TTL) and the next run re-classifies under the new prompt. v2:
-// urgency reframed to be relative to what the user must do, not topic severity.
-export const SUMMARY_CACHE_VERSION = 2;
+// (they age out via TTL) and the next run re-classifies under the new prompt.
+//   v2: urgency reframed to be relative to what the user must do, not topic severity.
+//   v3: directedness evidence added (tagged_count / my_tag_position generalising
+//       is_broadcast into one spectrum) — v2 verdicts were reached without it.
+export const SUMMARY_CACHE_VERSION = 3;
 export function threadCacheKey(threadId, newestPos, threadWatermark) {
   if (!threadId || newestPos == null) return null;
   return `v${SUMMARY_CACHE_VERSION}|${threadId}|${newestPos}|${threadWatermark ?? 'none'}`;
@@ -120,6 +139,12 @@ export function threadCacheKey(threadId, newestPos, threadWatermark) {
 function normalize(msg, { isDM, selfOpenId }) {
   const text = (msg.content || '').trim();
   const senderType = msg.sender?.sender_type || null;
+  // Directedness signals (2026-08-11) — HOW PERSONALLY this message addressed the user,
+  // read off the tag list itself. Verified against 14d of live data: Lark returns
+  // `mentions[]` in TEXT order and stamps each entry with an explicit ordinal
+  // (`key: "@_user_1"`, `"@_user_2"`, …), so tag position is real data, not inferred.
+  const tagList = msg.mentions || [];
+  const myTagIndex = tagList.findIndex((m) => m.id === selfOpenId);
   return {
     messageId: msg.message_id,
     chatId: msg.chat_id,
@@ -135,9 +160,21 @@ function normalize(msg, { isDM, selfOpenId }) {
     threadPosition: parsePosition(msg.thread_message_position),
     chatName: null, // resolved later, best-effort
     isDM,
-    // @all broadcast (group message that didn't name me directly). Kept, but
-    // labelled and down-ranked downstream. DMs are never broadcasts.
-    isBroadcast: !isDM && !mentionsUser(msg.mentions, selfOpenId),
+    // @all broadcast (group message that didn't name me directly) — the far end of the
+    // directedness spectrum below. Kept, but labelled and down-ranked downstream.
+    // DMs are never broadcasts.
+    isBroadcast: !isDM && myTagIndex < 0,
+    // How many people this message @mentioned in total. Fewer ⇒ more personally
+    // addressed; a long tag list usually means a status update / Q&A card / release
+    // note where the user is one of many recipients rather than the person being asked.
+    taggedCount: tagList.length,
+    // The user's 1-based slot in that tag list (null when not directly named, e.g. @all).
+    // Being named FIRST can mean the ask is primarily theirs — but it's a WEAK signal:
+    // measured on Tessa's real 14d window she sat at position 2 in 47 of 94 direct @s
+    // (63% for automated senders), because senders and templates repeat a roster order.
+    // Passed to the classifier as evidence to weigh against the sentence, never used as
+    // a ranking rule. See SPEC "Directedness".
+    myTagPosition: myTagIndex >= 0 ? myTagIndex + 1 : null,
     senderId: msg.sender?.id || null,
     // Automated senders (app/bot) often carry no display name in the payload (just
     // an app_id like `cli_…`) — show a clean 'Bot' label instead of the raw id.
@@ -246,11 +283,60 @@ function atMeMentions(members) {
 }
 
 /**
+ * The bundle's **strongest directedness** — the most personally-addressed direct @me in
+ * it: fewest people tagged, ties broken by the earliest tag position. A thread can hold
+ * both a near-1:1 ask and a 28-person blast; the personal ask is the salient fact about
+ * how the user was addressed, so the row is described by its most direct mention rather
+ * than by an average or by whichever came last. Nulls when nothing in the bundle named
+ * the user directly (an @all-only bundle, or a DM — which is 1:1 by construction).
+ */
+function strongestTag(members) {
+  const direct = members.filter((m) => m.myTagPosition != null);
+  if (direct.length === 0) return { taggedCount: null, myTagPosition: null };
+  const best = direct.reduce((a, b) => {
+    if (b.taggedCount !== a.taggedCount) return b.taggedCount < a.taggedCount ? b : a;
+    return b.myTagPosition < a.myTagPosition ? b : a;
+  });
+  return { taggedCount: best.taggedCount, myTagPosition: best.myTagPosition };
+}
+
+/**
+ * Pick the row's **representative** — the member whose sender, verbatim excerpt, jump
+ * link and timestamp the card row shows, and whose `senderType` decides whether the row
+ * is filed under 🤖 BOT / APP.
+ *
+ * Normally that's simply the latest message in the bundle. **But the row must be anchored
+ * to whoever actually addressed the user, not to whoever spoke last** (2026-08-11): in a
+ * thread where a colleague @mentioned the user and a workflow app @'d later, the latest
+ * member is the bot — so the row would be filed under bots, labelled `· bot ·`, and would
+ * show the app's routing note in place of the colleague's real ask. A genuine ask would be
+ * buried behind an automated one.
+ *
+ * ⇒ when the latest member is automated but a **human directly @mentioned the user** in
+ * the same bundle, anchor to the **latest human direct-@me** instead. Everything
+ * downstream (section routing, the `· bot ·` label, the excerpt, the jump target) then
+ * follows from one correctly-chosen sender, so `isAutomatedSender(row)` alone is the right
+ * question everywhere — no second mechanism to keep in step.
+ *
+ * Same line as the 2026-07-14 sender-filter and 2026-07-02 noise-channel carve-outs:
+ * **a real person naming the user always wins.** The bot's own message is still reachable —
+ * it stays in `members` (so it counts toward the bundle summary + unread count) and, when
+ * it's a direct @me, gets its own line and jump in the per-@ expander.
+ */
+function pickRepresentative(members) {
+  const latest = pickLatest(members);
+  if (!isAutomatedSender(latest)) return latest;
+  const humanAtMe = members.filter((m) => !m.isDM && !m.isBroadcast && !isAutomatedSender(m));
+  return humanAtMe.length ? pickLatest(humanAtMe) : latest;
+}
+
+/**
  * Group the filtered unread items into rows (replaces the old per-chat collapse).
- * Each row carries the representative (the latest message — it supplies the card's
- * verbatim line + jump link), the `bundleType`, the `members` (all unread items in
- * that group — used to build the bundle, then dropped), and `chatUnreadCount` (the
- * "+N more" count; refined to the thread's unread total once a thread is fetched).
+ * Each row carries the representative (see `pickRepresentative` — it supplies the card's
+ * sender, verbatim line, jump link and bot-vs-human classification), the `bundleType`,
+ * the `members` (all unread items in that group — used to build the bundle, then dropped),
+ * and `chatUnreadCount` (the "+N more" count; refined to the thread's unread total once a
+ * thread is fetched).
  */
 export function groupRows(items) {
   const byKey = new Map();
@@ -263,7 +349,12 @@ export function groupRows(items) {
   return [...byKey.values()].map(({ type, members }) => {
     const mentions = atMeMentions(members);
     return {
-      ...pickLatest(members),
+      ...pickRepresentative(members),
+      // Overrides the representative's own tag figures with the bundle's most direct
+      // ones — NB this must come after the spread above. Distinct from `mentionCount`:
+      // `taggedCount` counts PEOPLE named in one message, `mentionCount` counts @me
+      // MESSAGES in the bundle.
+      ...strongestTag(members),
       bundleType: type,
       members,
       chatUnreadCount: members.length,
@@ -341,6 +432,25 @@ export function buildThreadSlice(messages, { mentionIds, threadWatermark, headMs
 }
 
 /**
+ * Best-effort jump-link rescue for a thread that never touches the main timeline
+ * at all — verified live (2026-08) on real threads: one started via "reply in
+ * thread" from scratch carries the "-3" sentinel on EVERY message, so there's no
+ * `message_position` anywhere to anchor `chat/open` on, and the specific message's
+ * own `jumpLink()` falls back to an unverified `openThreadId` param. If the thread
+ * we already fetched for the bundle has even ONE message mirrored to main (a real
+ * position — some threads are a mix), reuse it as the anchor for anything in the
+ * bundle that lacks its own: still the PROVEN `chat/open`+`position` mechanism,
+ * just pointed at the nearest working spot instead of the exact message. Zero
+ * extra cost (msgs is already fetched); no-op when the link already has a real
+ * position of its own.
+ */
+export function anchorFallback(link, chatId, anchorPos) {
+  if (!link || link.includes('&position=')) return link;
+  const host = (/^https?:\/\/[^/]+/.exec(link) || [])[0] || 'https://applink.larksuite.com';
+  return `${host}/client/chat/open?openChatId=${encodeURIComponent(chatId)}&position=${anchorPos}`;
+}
+
+/**
  * Build a thread row's bundle: gate → fetch → slice → shape for the classifier.
  * Mutates the row's `chatUnreadCount` to the thread's unread total and sets a short
  * `threadTopic` (from the head) so two threads in one chat are distinguishable on the
@@ -355,6 +465,15 @@ async function buildThreadBundle(row, watermark, self) {
   const raw = await listThreadMessages(row.threadId, { sort: 'desc', pageSize: config.threadFetchPageSize });
   if (raw.length === 0) return null;
   const msgs = raw.map((m) => normalize(m, { isDM: false, selfOpenId: self.openId }));
+
+  // Anchor rescue (see anchorFallback) — runs even if we bail out to a single-message
+  // summary below, since it only touches row.link / row.mentions, not the bundle.
+  const realPositions = msgs.map((m) => m.position).filter((p) => p != null);
+  if (realPositions.length > 0) {
+    const anchorPos = Math.min(...realPositions);
+    row.link = anchorFallback(row.link, row.chatId, anchorPos);
+    for (const m of row.mentions || []) m.link = anchorFallback(m.link, row.chatId, anchorPos);
+  }
 
   const threadWatermark = watermark.thread.get(row.threadId);
   const unreadCount = msgs.filter(

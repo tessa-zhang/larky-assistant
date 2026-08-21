@@ -32,7 +32,14 @@ Named ≠ asked (read this — it's the crux). Being @mentioned does NOT by itse
 - status updates where no one is asked to do anything.
 The test for "high"/"medium": does the SENDER need ${you} to do something? If they are informing, routing, or merely copying ${you}, it is "low"/"fyi" regardless of how urgent the topic is. Rate up ONLY when a concrete action lands on ${you} personally.
 
-Broadcasts: a message with "is_broadcast": true was sent to a whole channel via @all — not directed at ${you} personally. Same principle, stronger: bias to "low"/"fyi". Use "medium" only if it demands a concrete action ${you} must personally take (RSVP, form by a deadline); "high" only for a genuine incident/outage ${you} owns.
+How directly was ${you} addressed? Items carry "tagged_count" (how many people the message @mentioned in total) and "my_tag_position" (${you}'s 1-based slot in that tag list, so 1 = named first). "is_broadcast": true means it went to the whole channel via @all, naming nobody individually. Together these describe a SPECTRUM of directedness, most to least personal:
+- a DM, or "tagged_count": 1 — ${you} is the only person named: as personal as it gets, and most likely a real ask;
+- a short tag list (${you} and a couple of others) — still pointed; a genuine request usually looks like this;
+- a long tag list — the more people named, the more likely ${you} is one of many recipients of a status update, Q&A card, or release note rather than the person being asked;
+- "is_broadcast": true (@all) — the far end: addressed to everyone, therefore to no one in particular.
+Weigh this as EVIDENCE, never as a rule — the sentence itself always wins. A 12-person thread saying "@${you} please approve this today" is a real ask; a 2-person tag saying "fyi, closing this out" is still fyi. Judge relative to the chat: what counts as a "long" tag list differs between a 5-person squad and a 200-person channel.
+"my_tag_position" is the WEAKEST of these signals — being named first sometimes means the ask is primarily ${you}'s, but tag order just as often reflects a roster, a template, or alphabetical habit. Let it tip only a decision that is otherwise balanced; never demote a clear ask because ${you} was named second.
+For @all specifically: bias to "low"/"fyi". Use "medium" only if it demands a concrete action ${you} must personally take (RSVP, form by a deadline); "high" only for a genuine incident/outage ${you} owns.
 
 Category:
 - "incident": something broken or degraded in production
@@ -43,10 +50,10 @@ Category:
 
 Summary: max 15 words, plain English, even for a multi-message bundle. LEAD WITH THE ASK (what ${you} must do / decide), don't enumerate the messages. When nothing is asked of ${you}, say so plainly (e.g. "FYI: warehouse routing note — no action needed from you").
 
-Input format:
+Input format ("tagged_count"/"my_tag_position" are omitted when ${you} wasn't named directly, e.g. an @all or a DM):
 [
-  { "message_id": "...", "sender": "...", "chat_name": "...", "is_broadcast": false, "text": "..." },
-  { "message_id": "...", "sender": "...", "chat_name": "...", "is_broadcast": false, "kind": "thread", "messages": [ { "from": "...", "text": "..." }, ... ] },
+  { "message_id": "...", "sender": "...", "chat_name": "...", "is_broadcast": false, "tagged_count": 2, "my_tag_position": 1, "text": "..." },
+  { "message_id": "...", "sender": "...", "chat_name": "...", "is_broadcast": false, "tagged_count": 9, "my_tag_position": 6, "kind": "thread", "messages": [ { "from": "...", "text": "..." }, ... ] },
   ...
 ]
 
@@ -60,6 +67,13 @@ Output format (one object per item, keyed by its message_id):
 const VALID_URGENCY = new Set(['high', 'medium', 'low']);
 const VALID_CATEGORY = new Set(['incident', 'decision_needed', 'review_request', 'question', 'fyi']);
 
+// Fallback when classification is unavailable (no API key) or unusable (parse error /
+// invalid fields). `low`/`fyi` is safe again now that the card renders EVERY urgency
+// (2026-08-11): an unjudged message still appears, just in the collapsed LOW panel, so
+// nothing is dropped and a keyless run degrades quietly instead of forcing every item
+// into MEDIUM. (It was briefly `medium`/`question` during the action-only experiment,
+// when `low` meant "not rendered at all" and a keyless run would have produced an empty
+// digest — if a filter on urgency is ever reintroduced, this must change back with it.)
 function fallback(item) {
   return {
     urgency: 'low',
@@ -94,8 +108,15 @@ function toInput(it) {
     message_id: it.messageId,
     sender: it.senderName,
     chat_name: it.chatName || (it.isDM ? 'Direct message' : 'group'),
-    is_broadcast: !!it.isBroadcast, // @all blast — bias low (see system prompt)
+    is_broadcast: !!it.isBroadcast, // @all blast — the far end of the directedness spectrum
   };
+  // Directedness evidence (see systemPrompt): how many people were tagged and where the
+  // user sat in that list. Only present when the user was named directly — omitted rather
+  // than sent as null so the model isn't asked to interpret a placeholder.
+  if (it.myTagPosition != null) {
+    base.tagged_count = it.taggedCount;
+    base.my_tag_position = it.myTagPosition;
+  }
   // R6: a bundled row (DM unread run / thread slice) → send the whole conversation;
   // otherwise the single message, as before. Per-message text is already clipped at
   // bundle-build time, so just bound the single-message path here.

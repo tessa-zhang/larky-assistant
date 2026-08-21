@@ -1,5 +1,6 @@
-import { URGENCY_ORDER, URGENCY_META, config } from './config.js';
+import { URGENCY_ORDER, URGENCY_META, BOT_SECTION_META, config } from './config.js';
 import { formatDate, formatDateTime, relativeTime } from './time.js';
+import { isAutomatedSender } from './fetchMentions.js';
 
 /** Subtitle window phrase, e.g. "since Tue 16 Jun" (date only — see formatDate). */
 function sinceText(windowStart) {
@@ -25,15 +26,27 @@ export function previewText(text, max = 160) {
   return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
 }
 
+/**
+ * groupchat | DM | bot — `bot` wins over DM/groupchat. Reads the row's representative,
+ * which is anchored to whoever addressed the user (fetchMentions.pickRepresentative), so
+ * this label always agrees with the section the row was routed to.
+ */
+function chatType(item) {
+  if (isAutomatedSender(item)) return 'bot';
+  return item.isDM ? 'DM' : 'groupchat';
+}
+
+/** Action | FYI — the 5-way classify category collapsed to the binary that matters at a glance. */
+function actionOrFyi(item) {
+  return item.category === 'fyi' ? 'FYI' : 'Action';
+}
+
+/** Title format: <chat name> · <groupchat|DM|bot> · <Action|FYI>. */
 function itemLabel(item) {
-  if (item.isDM) return `${item.chatName || item.senderName || 'Direct message'} · DM`;
-  // Group: prefer the resolved chat name; until bot capability is enabled it's
-  // null, so fall back to whoever sent the latest unread message.
-  const base = item.chatName || (item.senderName ? `${item.senderName} · group` : 'group');
-  // A chat can now yield several thread rows (R6) — mark them and, where we have it,
-  // append a short topic from the thread head so they're distinguishable at a glance.
-  if (item.bundleType === 'thread') return item.threadTopic ? `${base} · 🧵 ${item.threadTopic}` : `${base} · 🧵`;
-  return base;
+  // Prefer the resolved chat name; until bot capability is enabled it's null for
+  // groups, so fall back to whoever sent the latest unread message.
+  const name = item.chatName || item.senderName || (item.isDM ? 'Direct message' : 'Group chat');
+  return `${name} · ${chatType(item)} · ${actionOrFyi(item)}`;
 }
 
 /** A schema-2.0 open_url button (Jump). Reused for the row + per-@ expander links. */
@@ -94,7 +107,13 @@ function itemBlock(item, now, { expandable = false } = {}) {
   // @all broadcasts are kept but flagged so a channel-wide blast doesn't read as
   // a personal ping (they're also biased low at classification).
   const broadcast = item.isBroadcast ? ' · 📣 @all' : '';
-  const header = `**${item.n}.** ${meta.emoji} **[${md(itemLabel(item))}]** · ${md(item.category)}${broadcast}${ago ? ` · ${ago}` : ''}${atYou}${more}`;
+  // Directedness, shown so the ranking is auditable: the classifier weighs these signals
+  // (2026-08-11) and this is how you check it's honouring them. `🎯 you only` = nobody
+  // else tagged; otherwise `👥 you 2/5` = you were named 2nd of 5 people tagged.
+  const tag = !item.isDM && item.myTagPosition
+    ? (item.taggedCount === 1 ? ' · 🎯 you only' : ` · 👥 you ${item.myTagPosition}/${item.taggedCount}`)
+    : '';
+  const header = `**${item.n}.** ${meta.emoji} **[${md(itemLabel(item))}]**${broadcast}${tag}${ago ? ` · ${ago}` : ''}${atYou}${more}`;
   const summary = md(item.summary); // AI actionable
   // For group messages, prefix the sender so you know who pinged you.
   const raw = previewText(item.text, config.rawPreviewChars);
@@ -113,58 +132,80 @@ function sectionTitle(meta, count) {
 }
 
 /**
- * The LOW/FYI item blocks (all of them — no cap). Shared by the collapsed panel and
- * the expanded (only-bucket) render.
+ * Every item block for a bucket, in order — no display cap. Shared by the collapsed
+ * panel and the expanded (only-bucket) render, for both LOW/FYI and the bot/app section.
+ * Volume is already bounded upstream by MAX_MESSAGES, and each item carries a summary
+ * worth reading, so hiding the tail behind an unreachable "+N more" only removed the
+ * ability to act on it (2026-07-20). A bucket may still *collapse* — that's the panel's
+ * job (R3); this just fills it completely.
  */
-function lowItems(bucket, now, expandable = false) {
-  // Every low item is listed — no display cap. LOW volume is already bounded upstream
-  // by MAX_MESSAGES, and each item now carries an assuring "FYI:" summary worth reading,
-  // so hiding the tail behind an unreachable "+N more" only removed the ability to act
-  // on it. LOW still *collapses* behind the panel (R3) — this just fills it completely.
+function bucketItems(bucket, now, expandable = false) {
   const inner = [];
   for (const it of bucket) inner.push(...itemBlock(it, now, { expandable }));
   return inner;
 }
 
 /**
- * The LOW/FYI bucket as a collapsed `collapsible_panel` (R3). The header still
- * carries the count so you see how many low items exist without expanding; ALL of
- * them live inside, revealed on demand (no cap). HIGH/MEDIUM are never collapsed —
- * they're rendered flat by the caller.
+ * A whole bucket as a collapsed `collapsible_panel` (the R3 pattern). The header
+ * keeps the count so you see how many items are in there without expanding; ALL of
+ * them live inside, revealed on demand (no cap). Used for LOW/FYI and for the
+ * bot/app section — both are "keep it visible, keep it out of the way" buckets, so
+ * they share one renderer. HIGH/MEDIUM are never collapsed (rendered flat by the caller).
+ * `expandable:false` — no per-@ expander nested inside a panel (Lark 2.0 nested
+ * collapsibles are unverified).
  */
-function lowPanel(bucket, now) {
+function collapsedPanel(meta, bucket, now) {
   return {
     tag: 'collapsible_panel',
     expanded: false,
     header: {
-      title: { tag: 'markdown', content: sectionTitle(URGENCY_META.low, bucket.length) },
+      title: { tag: 'markdown', content: sectionTitle(meta, bucket.length) },
       vertical_align: 'center',
       icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '16px 16px' },
       icon_position: 'right',
       icon_expanded_angle: -180,
     },
-    // expandable:false — no per-@ expander nested inside the LOW/FYI panel.
-    elements: lowItems(bucket, now, false),
+    elements: bucketItems(bucket, now, false),
   };
 }
 
 /**
  * Build a Lark interactive card (schema 2.0) from numbered, classified items.
  * `items` must each carry: n, urgency, category, summary, chatName, isDM,
- * createTime, link. HIGH + MEDIUM render expanded; LOW/FYI is collapsed behind a
- * `collapsible_panel` so a busy digest stays scannable (R3) — unless LOW is the
- * *only* bucket, in which case it renders expanded (nothing above it to bury). All
- * low items are listed either way (no cap).
+ * createTime, link.
+ *
+ * Sections, in reading order (matching `numberItems`' sort so numbering runs
+ * monotonically down the card):
+ *   - **human HIGH / MEDIUM** — rendered flat/expanded, the action list;
+ *   - **human LOW/FYI** — collapsed behind a `collapsible_panel` (R3), or flat when
+ *     it's the only bucket. Normally EMPTY: `runDigest` filters human lows out
+ *     (action-only digest) and this path is kept for the R14 Catch Me Up brief;
+ *   - **🤖 BOT / APP** — every bot/app item regardless of urgency, in its own collapsed
+ *     panel at the bottom (2026-08-11). Automated pings stay visible without competing
+ *     with human asks; the header count shows how many without expanding.
  */
 export function buildDigestCard({ items, since, generatedAt = new Date(), footerHint }) {
   const now = generatedAt;
 
-  // Group by urgency, preserving the high→medium→low order.
+  // Bot/app rows are pulled out FIRST — an automated row goes to the bot section
+  // whatever it classified as, so it never lands in the human urgency buckets. The row's
+  // sender is already anchored to whoever ADDRESSED the user rather than whoever spoke
+  // last (fetchMentions.pickRepresentative), so a thread a colleague @'d the user in
+  // reads as human here even if a bot @'d later — no genuine ask gets filed under bots.
   const groups = { high: [], medium: [], low: [] };
-  for (const it of items) (groups[it.urgency] || groups.low).push(it);
+  const bots = [];
+  for (const it of items) {
+    if (isAutomatedSender(it)) bots.push(it);
+    else (groups[it.urgency] || groups.low).push(it);
+  }
+  const humanCount = items.length - bots.length;
 
+  // Nothing is filtered out any more (the action-only experiment was reverted the same
+  // day), so the subtitle is a plain count again — no "N left out" note to keep honest.
+  // Human and bot counts are split because they render as separate sections.
+  const botNote = bots.length > 0 ? ` · ${bots.length} bot/app` : '';
   const elements = [
-    { tag: 'markdown', content: `Showing **${items.length}** mention${items.length === 1 ? '' : 's'} & DM${items.length === 1 ? '' : 's'} ${sinceText(since)}` },
+    { tag: 'markdown', content: `Showing **${humanCount}** mention${humanCount === 1 ? '' : 's'} & DM${humanCount === 1 ? '' : 's'} ${sinceText(since)}${botNote}` },
   ];
 
   for (const key of Object.keys(groups).sort((a, b) => URGENCY_ORDER[a] - URGENCY_ORDER[b])) {
@@ -173,20 +214,32 @@ export function buildDigestCard({ items, since, generatedAt = new Date(), footer
     const meta = URGENCY_META[key];
     elements.push({ tag: 'hr' });
     if (key === 'low') {
-      // LOW/FYI still collapses behind a panel so it doesn't bury HIGH/MEDIUM (R3) — but
-      // the panel now holds EVERY low item (no cap): expanding it shows them all, each
-      // with its assuring "FYI:" summary, instead of "~10 and +N more" with no way to act
-      // on the rest. When LOW is the *only* bucket there's nothing above to protect and a
-      // lone collapsed bucket reads like the empty state, so render it flat/expanded.
+      // LOW/FYI collapses behind a panel so it doesn't bury HIGH/MEDIUM (R3) — holding
+      // EVERY low item (no cap). When LOW is the *only* human bucket there's nothing above
+      // to protect and a lone collapsed bucket reads like the empty state, so render it
+      // flat/expanded. (Unused while runDigest filters human lows out; kept for R14.)
       if (groups.high.length === 0 && groups.medium.length === 0) {
         elements.push({ tag: 'markdown', content: sectionTitle(meta, bucket.length) });
-        elements.push(...lowItems(bucket, now, true));
+        elements.push(...bucketItems(bucket, now, true));
       } else {
-        elements.push(lowPanel(bucket, now));
+        elements.push(collapsedPanel(meta, bucket, now));
       }
     } else {
       elements.push({ tag: 'markdown', content: sectionTitle(meta, bucket.length) });
       for (const it of bucket) elements.push(...itemBlock(it, now, { expandable: true }));
+    }
+  }
+
+  if (bots.length > 0) {
+    elements.push({ tag: 'hr' });
+    // Same "visible but out of the way" treatment as LOW/FYI, and the same escape hatch:
+    // when there's nothing human above it, a lone collapsed panel reads like the empty
+    // state, so render the bot section flat instead of hiding the card's only content.
+    if (humanCount === 0) {
+      elements.push({ tag: 'markdown', content: sectionTitle(BOT_SECTION_META, bots.length) });
+      elements.push(...bucketItems(bots, now, true));
+    } else {
+      elements.push(collapsedPanel(BOT_SECTION_META, bots, now));
     }
   }
 
