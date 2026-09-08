@@ -8,7 +8,7 @@ import { relativeTime, formatDateTime, formatDate, MS_PER_HOUR } from '../src/ti
 import { isExcludedChatName, config } from '../src/config.js';
 import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, passesSenderFilter, isAutomatedSender, jumpLink, anchorFallback, parsePosition, threadCacheKey, SUMMARY_CACHE_VERSION } from '../src/fetchMentions.js';
 import { reactedIdsFromDetails } from '../src/lark.js';
-import { extractJson, systemPrompt } from '../src/classify.js';
+import { extractJson, systemPrompt, buildClient } from '../src/classify.js';
 import { buildDigestCard, previewText } from '../src/buildCard.js';
 import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, getCachedSummary, setCachedSummary, pruneSummaryCache, load, save } from '../src/state.js';
 import { numberItems } from '../src/commands.js';

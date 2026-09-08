@@ -249,6 +249,19 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       `SUMMARY_CACHE_VERSION` → **3** (v2 verdicts predate the signal). Scales with **no per-user
       config, no absolute thresholds, no extra API calls, nothing persisted** — see **Directedness**.
       Unit-tested (`strongestTag` via `groupRows`, prompt framing, badge incl. DM/@all suppression).
+- [x] **Configurable inference endpoint** *(2026-09-01)*: optional `ANTHROPIC_BASE_URL` sends
+      classification through an Anthropic-compatible **gateway** instead of `api.anthropic.com`.
+      Motivated by the sanctioned path — LiteLLM is on Traveloka's IT-listed AI set and works
+      *only* via a base-URL override — and it removes the need to patch `classify.js` to change
+      providers. Unset = the previous direct-to-Anthropic path, so the default data flow is
+      unchanged. Because this is the single place inlark's content leaves the machine, a
+      non-default value **logs the endpoint to stderr on every run** (`buildClient`) rather than
+      redirecting message text silently. **Not a licence to point it anywhere:** the target must
+      be a gateway IT/Security has approved for company data, and pointing it at an unlisted
+      host contradicts the privacy note below and the R16 custodial guarantee — so that note
+      must be updated in the same change. *(A Cursor pilot was raised 2026-09-01 as the driver;
+      no Cursor-specific config was added — an org-level AI-tools listing, not a chat approval,
+      is what would make such a target legitimate.)*
 
 **🔜 Next** (detail in [Roadmap](#roadmap)) — **R2 single-user bot is LIVE (2026-08-04);** the cohort
 build is now gated on an assessment. (R8's interim 7d bump shipped 2026-07-02; fuller stable-anchor design
@@ -365,6 +378,17 @@ parked, not blocking.)
       were apps) and Directedness feeds breadth to the classifier. **Next step is measurement, not design** —
       count human LOW rows on a live run before committing; if still long, the cleanest form may be inside
       **R14**'s synthesis rather than a second axis on the card. See Roadmap R18.
+- [ ] **R19 — Topic-grouped digest** (⚗️ **branch experiment**, added 2026-08-21): group rows by **topic**
+      — what the messages are *about* — instead of a single flat layer keyed on urgency, so I deal with one
+      subject at a time and stop context-switching down the card. **Distinct from R18:** a topic can span
+      *several chats* (one incident discussed in a squad group, an ops channel and a DM), which is exactly
+      where the context-switching cost is worst; R18's chat-context buckets can't cross a chat by
+      definition. They **compete for the same card axis**, so this is an alternative to R18, not an addition
+      — evaluate together, ship at most one. Build on a **feature branch**; `main` stays shippable. Key
+      design constraints: topic labels can't come from the existing per-chunk classify calls (chunks of 40
+      run concurrently and can't see each other, so labels won't agree), urgency must stay visible (a HIGH
+      buried in topic cluster #4 is the action-only failure mode again), and `done`/`snooze` numbering must
+      stay monotonic down the card. See Roadmap R19.
 
 ---
 
@@ -833,7 +857,8 @@ file holds:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — (required) | Claude classification; without it every item falls back to `low`/`fyi` |
+| `ANTHROPIC_API_KEY` | — (required) | Claude classification; without it every item falls back to `low`/`fyi`. Must be a key on an **IT-listed AI account** — message text is sent with it |
+| `ANTHROPIC_BASE_URL` | — (unset → `api.anthropic.com`) | Route classification via an Anthropic-compatible **gateway** (e.g. LiteLLM, which needs this override). ⚠️ The only setting that changes **where message text goes** — IT/Security-approved targets only; a non-default value is logged to stderr each run |
 | `SEND_AS` | `user` | `user` → deliver to my self-chat (works today); `bot` → bot DM reply (needs published bot-send scopes) |
 | `CLAUDE_MODEL` | `claude-sonnet-4-6` | Classification model |
 | `LOOKBACK_HOURS` | `168` | Fixed **rolling** lookback per run (7 days; bumped from 72h 2026-07-02), independent of last run. User-tunable per taste/role. `LOOKBACK_DAYS` still honored for back-compat (×24) |
@@ -938,7 +963,12 @@ verify on the token (`auth status` scope count = 11, incl. `contact:user.basic_p
   (14d, unchanged), so widening the mention/DM window from 3→7d adds little; the common
   case stays bounded.
 - **Privacy** — message text is sent to the Anthropic API for classification;
-  confirm this is acceptable for internal content before wider use.
+  confirm this is acceptable for internal content before wider use. Since
+  2026-09-01 the endpoint is configurable (`ANTHROPIC_BASE_URL`) — **unset by
+  default**, so the guarantee above describes the shipped path. Setting it to
+  anything other than an IT/Security-approved gateway moves colleagues' message
+  text to an unsanctioned third party and voids this note; the run logs the
+  endpoint whenever it isn't the default.
 - **Auth resilience** — owned by `lark-cli`; a `needs_refresh` token is still
   usable (it refreshes on the next API call), so runs don't fail on it.
 

@@ -139,6 +139,24 @@ async function classifyChunk(client, items, userName) {
 }
 
 /**
+ * Build the Anthropic client, honouring an optional gateway base URL.
+ *
+ * Default (ANTHROPIC_BASE_URL unset) is the Anthropic API directly — the data
+ * path the SPEC/README privacy note describes. A non-default endpoint means
+ * message text leaves for a third party, so we say so on stderr rather than let
+ * it happen silently: this is the only place inlark's content exits the machine.
+ */
+export function buildClient() {
+  const { anthropicApiKey: apiKey, anthropicBaseUrl: baseURL } = config;
+  if (!baseURL) return new Anthropic({ apiKey });
+  console.error(
+    `[classify] NOTE: classification is routed via ANTHROPIC_BASE_URL=${baseURL} — ` +
+    `message text is sent there, not to api.anthropic.com. Use only an IT-approved gateway.`,
+  );
+  return new Anthropic({ apiKey, baseURL });
+}
+
+/**
  * Classify all items, chunked across Claude calls (run concurrently).
  * Returns Map<message_id, { urgency, category, summary }>.
  * `userName` is woven into the prompt so urgency is judged relative to what THIS
@@ -155,7 +173,7 @@ export async function classify(items, { userName } = {}) {
     return result;
   }
 
-  const client = new Anthropic({ apiKey: config.anthropicApiKey });
+  const client = buildClient();
   const chunks = chunk(items, CHUNK_SIZE);
 
   const settled = await Promise.allSettled(chunks.map((c) => classifyChunk(client, c, userName)));

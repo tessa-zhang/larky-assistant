@@ -156,5 +156,8 @@ src/
   `--exclude-sender-type bot` filter carries the noise reduction.
 - **Privacy**: message text is sent to the Anthropic API for classification.
   Confirm this is acceptable for internal content before wider use.
+  `ANTHROPIC_BASE_URL` can redirect that to an Anthropic-compatible gateway —
+  leave it unset unless IT/Security has approved the target for company data.
+  A non-default endpoint is logged on every run.
 - `MAX_MESSAGES` caps a single run as a rate-limit guard; the CLI reports when
   items were capped.

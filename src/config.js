@@ -41,6 +41,17 @@ export const config = {
 
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
 
+  // Inference endpoint for classification. Empty = the Anthropic API directly,
+  // which is what the privacy guarantee in SPEC "Privacy & data handling" is
+  // written against. Set this ONLY to an IT-approved gateway that fronts the
+  // Anthropic API (LiteLLM is on Traveloka's listed set and requires exactly this
+  // override). Message text goes wherever this points, so a non-default value
+  // moves colleagues' Lark content to a third party — check with IT/Security
+  // before setting it, and update the SPEC/README privacy note if you do.
+  // classify.js logs the endpoint on every run that uses a non-default value, so
+  // the data path is never silent.
+  anthropicBaseUrl: (process.env.ANTHROPIC_BASE_URL || '').trim(),
+
   // Characters of the verbatim message shown beneath the AI summary on each card
   // item (≈2 lines on a wide card). The exact wording, so you can triage without
   // opening the chat (which would mark it read).
