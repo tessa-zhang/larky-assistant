@@ -38,6 +38,15 @@ export function numberItems(items) {
   return items;
 }
 
+/** Sorted, deduped messageIds — a cheap fingerprint of "what's currently unread". */
+export function pollSignature(items) {
+  return [...new Set(items.map((it) => it.messageId))].sort();
+}
+
+function signaturesEqual(a, b) {
+  return !!a && !!b && a.length === b.length && a.every((id, i) => id === b[i]);
+}
+
 function rehydrate(items) {
   for (const it of items || []) {
     if (it.createTime && !(it.createTime instanceof Date)) it.createTime = new Date(it.createTime);
@@ -57,7 +66,7 @@ function startWindow() {
  * Full digest run: fetch → classify → card. Persists lastRunAt + a snapshot of
  * the delivered items so done/snooze can act without re-fetching.
  */
-export async function runDigest({ self, delivery, footerHint, ack = false }) {
+export async function runDigest({ self, delivery, footerHint, ack = false, requireChange = false }) {
   const state = store.clearExpiredSnoozes(await store.load(self.openId));
   const since = startWindow();
   const sinceDate = new Date(since); // fixed lookback window start
@@ -66,6 +75,21 @@ export async function runDigest({ self, delivery, footerHint, ack = false }) {
   if (ack) await deliver(delivery, '⏳ Priotising your mentions, give me a moment…');
 
   const { items, skipped } = await fetchSince(since, self, state);
+
+  // R12 auto-poll change-gate: a scheduled tick only sends when the unread set
+  // actually moved since the last check — cheap (post-fetch, pre-classify), so
+  // an unchanged backlog costs no Claude tokens and never re-clutters the DM
+  // thread with a near-duplicate card. Manual triggers (`n`, npm run inlark)
+  // never set requireChange, so a person asking for the digest always gets one.
+  const signature = pollSignature(items);
+  if (requireChange && state.lastPollSignature !== null && signaturesEqual(signature, state.lastPollSignature)) {
+    state.lastRunAt = runAt.toISOString();
+    state.lastPollAt = runAt.toISOString();
+    await store.save(self.openId, state);
+    return { count: items.length, sent: false, skipped };
+  }
+  state.lastPollSignature = signature;
+  if (requireChange) state.lastPollAt = runAt.toISOString();
 
   if (items.length === 0) {
     await deliver(delivery, `✅ You're all caught up! No new unread mentions or DMs since ${formatDate(sinceDate)}.`);
@@ -141,6 +165,10 @@ async function rerender(userId, state, delivery, footerHint) {
   let remaining = rehydrate(state.lastDigest?.items || []).filter((it) => !hidden.has(it.messageId));
   numberItems(remaining);
   state.lastDigest = { ...state.lastDigest, items: remaining };
+  // Keep the poll change-gate in sync with what done/snooze just cleared, so the
+  // next scheduled tick doesn't mistake this self-caused shrink for an external
+  // change and re-send a card for items Tessa just dismissed.
+  if (state.lastPollSignature !== null) state.lastPollSignature = pollSignature(remaining);
   await store.save(userId, state);
   if (remaining.length === 0) {
     await deliver(delivery, '✅ All clear — nothing left in this digest.');

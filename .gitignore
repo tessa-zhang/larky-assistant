@@ -3,8 +3,11 @@ node_modules/
 state.json
 state/
 users.json
+homes/
 lark-im-resources/
 *.log
+onboarding-qr.png
+restore-owner-qr.png
 
 # Local Claude Code settings (personal, not shared)
 .claude/settings.local.json

@@ -29,6 +29,13 @@ const EMPTY_STATE = {
   lastRunAt: null,
   doneMessageIds: [],
   snoozedMessages: [], // [{ messageId, snoozeUntil }]
+  // R12 auto-poll change-gate: the sorted messageId set from the last poll
+  // check, so a scheduled tick can tell "nothing changed" from "new item
+  // arrived" without re-classifying. Synced on every runDigest AND on
+  // rerender() (done/snooze), so clearing an item never looks like an
+  // external change to the next tick. null until the first poll runs.
+  lastPollSignature: null,
+  lastPollAt: null,
   // Snapshot of the most recently delivered digest, so `done`/`snooze` can map
   // the numbers shown on the card to message_ids and re-render WITHOUT another
   // fetch/classify round-trip.

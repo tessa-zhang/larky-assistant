@@ -462,7 +462,7 @@ async function buildThreadBundle(row, watermark, self) {
   const lone = row.members.length < 2;
   if (lone && config.threadGateChars > 0 && (row.text || '').length >= config.threadGateChars) return null;
 
-  const raw = await listThreadMessages(row.threadId, { sort: 'desc', pageSize: config.threadFetchPageSize });
+  const raw = await listThreadMessages(row.threadId, { sort: 'desc', pageSize: config.threadFetchPageSize, home: self.home });
   if (raw.length === 0) return null;
   const msgs = raw.map((m) => normalize(m, { isDM: false, selfOpenId: self.openId }));
 
@@ -539,7 +539,7 @@ async function attachBundles(rows, watermark, self) {
  */
 async function buildWatermark(self) {
   const start = new Date(Date.now() - config.watermarkLookbackDays * MS_PER_DAY).toISOString();
-  const mine = await searchMessages({ sender: self.openId, start });
+  const mine = await searchMessages({ sender: self.openId, start, home: self.home });
   const chat = new Map();
   const thread = new Map();
   for (const m of mine) {
@@ -568,11 +568,11 @@ export async function fetchSince(startISO, self, state) {
     // silently killing real direct @me pings from workflow/booster apps. Sender
     // filtering happens in-code below (passesSenderFilter), where a bot/app that
     // names me directly is kept. See SPEC.
-    searchMessages({ isAtMe: true, chatType: 'group', start: startISO }),
+    searchMessages({ isAtMe: true, chatType: 'group', start: startISO, home: self.home }),
     // p2p keeps the pre-filter: a DM is never a direct-@me-via-mentions and never a
     // broadcast, so every automated DM is dropped in-code regardless — pre-filtering
     // at the API here is pure fetch-volume savings with no behavioural change.
-    searchMessages({ chatType: 'p2p', start: startISO, excludeSenderType: 'bot' }),
+    searchMessages({ chatType: 'p2p', start: startISO, excludeSenderType: 'bot', home: self.home }),
     buildWatermark(self),
   ]);
 
@@ -619,7 +619,7 @@ export async function fetchSince(startISO, self, state) {
   const groupChatIds = [...new Set(items.filter((it) => !it.isDM).map((it) => it.chatId))];
   const nameByChat = new Map();
   await Promise.all(
-    groupChatIds.map(async (cid) => nameByChat.set(cid, await getChatName(cid))),
+    groupChatIds.map(async (cid) => nameByChat.set(cid, await getChatName(cid, 'user', self.home))),
   );
   for (const it of items) {
     it.chatName = it.isDM ? it.senderName : nameByChat.get(it.chatId) || null;
@@ -638,7 +638,7 @@ export async function fetchSince(startISO, self, state) {
   // (post local + name filters) and BEFORE the per-chat collapse, so reacting to
   // a chat's latest message lets the row fall back to the next unaddressed one
   // rather than dropping the whole chat. See SPEC.md.
-  const reactedIds = await getReactedMessageIds(items.map((it) => it.messageId), self.openId);
+  const reactedIds = await getReactedMessageIds(items.map((it) => it.messageId), self.openId, self.home);
   items = items.filter((it) => {
     if (reactedIds.has(it.messageId)) { skipped.reacted++; return false; }
     return true;

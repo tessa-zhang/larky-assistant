@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { LARK_CLI_PROFILE } from './config.js';
 
 /**
  * Thin wrapper around the `lark-cli` binary. lark-cli owns all Lark auth
@@ -11,9 +12,27 @@ const MAX_SEARCH_PAGES = '40'; // auto-pagination ceiling for messages-search
 const REACTION_BATCH_SIZE = 20; // Lark caps reactions/batch_query at 20 message_ids/request
 const REACTION_PAGE_SIZE = 10; // Lark caps reactions returned per message at 10
 
-function runRaw(args) {
+/**
+ * Env-scoping (R2 multi-user): a per-call HOME override, applied as a scoped
+ * `env` option on ONE execFile call, never via mutating process.env.HOME —
+ * callers of runRaw can be in flight concurrently (the listener dispatches
+ * events async), and mutating shared process state across an await boundary
+ * would let one user's dispatch clobber another's HOME mid-flight. `home`
+ * omitted ⇒ the ambient process HOME (today's single-owner behavior) — the
+ * SAME `process.env` reference back, so no override is ever constructed when
+ * one isn't needed. See SPEC.md.
+ */
+export function scopedEnv(home) {
+  return home ? { ...process.env, HOME: home } : process.env;
+}
+
+function runRaw(args, { home } = {}) {
   return new Promise((resolve, reject) => {
-    execFile('lark-cli', args, { maxBuffer: MAX_BUFFER }, (err, stdout, stderr) => {
+    // --profile pins the call to our app regardless of lark-cli's global active
+    // profile (see LARK_CLI_PROFILE) — every exported function here goes through
+    // this one function, so this single append covers all of them.
+    const env = scopedEnv(home);
+    execFile('lark-cli', [...args, '--profile', LARK_CLI_PROFILE], { maxBuffer: MAX_BUFFER, env }, (err, stdout, stderr) => {
       // lark-cli prints a JSON result to stdout even on many failures; on hard
       // failures the error envelope may be on stderr. Try stdout, then stderr.
       let parsed = tryParse(stdout) ?? tryParse(stderr);
@@ -43,9 +62,14 @@ function tryParse(s) {
   }
 }
 
-/** Resolve current identity: open_id, display name, and brand (lark|feishu). */
-export async function getSelf() {
-  const status = await runRaw(['auth', 'status']);
+/**
+ * Resolve current identity: open_id, display name, and brand (lark|feishu).
+ * `home` (R2 multi-user) resolves identity under a specific isolated HOME
+ * instead of the ambient one — the result echoes `home` back so callers can
+ * carry a single `self` object downstream instead of threading two values.
+ */
+export async function getSelf(home) {
+  const status = await runRaw(['auth', 'status'], { home });
   const user = status.identities?.user;
   // `available` is the real gate. status may be 'ready' OR 'needs_refresh' —
   // both are usable, because lark-cli auto-refreshes on the next API call.
@@ -56,7 +80,28 @@ export async function getSelf() {
     openId: user.openId,
     userName: user.userName,
     brand: status.brand || 'lark',
+    home,
   };
+}
+
+/**
+ * Hard-refuse if a resolved identity doesn't match who we expect. The opposite
+ * of this file's fail-open helpers (getChatName, getReactedMessageIds) —
+ * losing a nice-to-have signal there is safe; running under the wrong
+ * identity's token is exactly the harm this guards against, so it throws
+ * instead of degrading. No-op (returns `resolved` unchanged) when there's
+ * nothing to check against.
+ */
+export function assertIdentity(resolved, expectedOpenId, context = '') {
+  if (!expectedOpenId) return resolved;
+  if (resolved.openId !== expectedOpenId) {
+    throw new Error(
+      `IDENTITY MISMATCH${context ? ` (${context})` : ''}: resolved open_id ${resolved.openId} ` +
+      `("${resolved.userName}") but expected ${expectedOpenId}. Refusing to run — no digest was ` +
+      `composed or delivered. Check for a stale/ambient HOME override or a wrong config value.`
+    );
+  }
+  return resolved;
 }
 
 /**
@@ -74,7 +119,7 @@ function toLarkTime(v) {
  * Search messages with user identity. Returns the raw enriched message array
  * (content already decoded to plain text by lark-cli).
  *
- * opts: { isAtMe, chatType: 'group'|'p2p', start, end, excludeSenderType }
+ * opts: { isAtMe, chatType: 'group'|'p2p', start, end, excludeSenderType, home }
  */
 export async function searchMessages(opts = {}) {
   const args = ['im', '+messages-search', '--as', 'user', '--page-all', '--page-limit', MAX_SEARCH_PAGES, '--json'];
@@ -84,7 +129,7 @@ export async function searchMessages(opts = {}) {
   if (opts.end) args.push('--end', toLarkTime(opts.end));
   if (opts.excludeSenderType) args.push('--exclude-sender-type', opts.excludeSenderType);
   if (opts.sender) args.push('--sender', opts.sender);
-  const res = await runRaw(args);
+  const res = await runRaw(args, { home: opts.home });
   return res.data?.messages || res.messages || [];
 }
 
@@ -103,7 +148,7 @@ export async function searchMessages(opts = {}) {
  * bundle just degrades that row to a single-message summary).
  */
 const THREAD_PAGE_MAX = 50; // Lark's real cap for this endpoint; >50 silently returns 0.
-export async function listThreadMessages(thread, { sort = 'desc', pageSize = THREAD_PAGE_MAX } = {}) {
+export async function listThreadMessages(thread, { sort = 'desc', pageSize = THREAD_PAGE_MAX, home } = {}) {
   if (!thread) return [];
   // Clamp hard: lark-cli's --help advertises 500, but page_size > 50 comes back EMPTY
   // (not an error), which would make every thread bundle silently fail open. See SPEC.
@@ -112,7 +157,7 @@ export async function listThreadMessages(thread, { sort = 'desc', pageSize = THR
     const res = await runRaw([
       'im', '+threads-messages-list', '--as', 'user', '--json', '--no-reactions',
       '--thread', thread, '--sort', sort, '--page-size', String(size),
-    ]);
+    ], { home });
     return res.data?.messages || res.messages || [];
   } catch {
     return [];
@@ -165,7 +210,7 @@ export function reactedIdsFromDetails(details, selfOpenId) {
  * Blind spot: `page_size_per_message` caps at 10, so on a message with >10
  * reactions where the user's isn't in the first 10, the reaction is missed.
  */
-export async function getReactedMessageIds(messageIds, selfOpenId) {
+export async function getReactedMessageIds(messageIds, selfOpenId, home) {
   const ids = [...new Set(messageIds)].filter(Boolean);
   if (!ids.length || !selfOpenId) return new Set();
 
@@ -185,7 +230,7 @@ export async function getReactedMessageIds(messageIds, selfOpenId) {
             queries: batch.map((message_id) => ({ message_id })),
             page_size_per_message: REACTION_PAGE_SIZE,
           }),
-        ]);
+        ], { home });
         for (const id of reactedIdsFromDetails(res.data?.success_msg_reaction_details, selfOpenId)) {
           reacted.add(id);
         }
@@ -202,12 +247,14 @@ export async function getReactedMessageIds(messageIds, selfOpenId) {
  * returns null (caller degrades gracefully) when unavailable.
  */
 const chatNameCache = new Map();
-export async function getChatName(chatId, as = 'user') {
+export async function getChatName(chatId, as = 'user', home) {
   if (!chatId) return null;
+  // Cache key is chatId only — a chat's name isn't viewer-dependent within one
+  // tenant, so it's safe (and avoids redundant lookups) to share this across users.
   if (chatNameCache.has(chatId)) return chatNameCache.get(chatId);
   try {
     // chat_id is a path param — lark-cli takes it via --params, not a flag.
-    const res = await runRaw(['im', 'chats', 'get', '--params', JSON.stringify({ chat_id: chatId }), '--as', as, '--json']);
+    const res = await runRaw(['im', 'chats', 'get', '--params', JSON.stringify({ chat_id: chatId }), '--as', as, '--json'], { home });
     const name = res.data?.name || res.name || null;
     chatNameCache.set(chatId, name);
     return name;

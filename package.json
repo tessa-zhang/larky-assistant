@@ -12,6 +12,10 @@
     "done": "node src/index.js done",
     "snooze": "node src/index.js snooze",
     "listen": "node src/index.js listen",
+    "adduser": "node src/index.js adduser",
+    "listusers": "node src/index.js listusers",
+    "reset-key": "node src/index.js reset-key",
+    "probe-models": "node src/probeModels.js",
     "test": "node --test"
   },
   "dependencies": {

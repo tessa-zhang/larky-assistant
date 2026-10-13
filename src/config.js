@@ -92,20 +92,25 @@ export const config = {
   // with multiple @-lines always fetch (a multi-message ask). 0 disables the gate.
   threadGateChars: Number(process.env.THREAD_GATE_CHARS || 140),
 
-  // --- R2 pre-launch token guard: per-thread summary cache --------------------
-  // Cache each thread row's CLASSIFICATION (urgency/category/summary — the
-  // expensive Anthropic output), keyed by thread_id + newest thread position + my
-  // per-thread watermark (see fetchMentions.threadCacheKey). On a later run an
-  // UNCHANGED thread (no new messages, and I haven't replied) reuses the stored
-  // summary with ZERO Anthropic tokens — the dominant cost lever once colleagues
-  // use this and every stateless run re-summarises the whole backlog. The
-  // token-free Lark thread fetch still runs (it's how we detect "unchanged"); only
-  // the Claude call is skipped. Per-user by construction (the cache lives in that
-  // user's state and the key encodes my watermark). Entries self-orphan as a thread
-  // advances, so a TTL ages orphans out to keep the cache bounded. Default 14d
-  // (matches the watermark lookback — a thread untouched that long won't resurface).
-  // Set THREAD_CACHE_TTL_HOURS=0 to disable the cache (kill switch).
-  threadCacheTtlHours: Number(process.env.THREAD_CACHE_TTL_HOURS ?? 24 * 14),
+  // --- R12: auto-poll inside `npm run listen` ---------------------------------
+  // A background timer proactively re-checks for new unread mentions/DMs on a
+  // fixed schedule and only SENDS a fresh card when the set actually changed
+  // (see commands.pollSignature) — so `listen` no longer requires typing `n`
+  // to refresh. See src/scheduler.js (currentSlotId) for the wall-clock-aligned
+  // firing logic. Set POLL_ENABLED=false to fall back to fully on-demand.
+  pollEnabled: (process.env.POLL_ENABLED ?? 'true') === 'true',
+  poll: {
+    // Cadence. Default 240 (4h — checks at 10:00/14:00/18:00) is a deliberately
+    // conservative starting point: even a change-gated send still pushes a full
+    // card into the DM thread, and too-frequent sends bury the latest digest
+    // under near-duplicates. Shrink this (e.g. back to 30) once lived with.
+    intervalMinutes: Number(process.env.POLL_INTERVAL_MINUTES || 240),
+    // Poll window, local time, inclusive of both ends (last check fires AT endHour).
+    startHour: Number(process.env.POLL_START_HOUR || 10),
+    endHour: Number(process.env.POLL_END_HOUR || 18),
+    // Skip Saturday/Sunday.
+    weekdaysOnly: (process.env.POLL_WEEKDAYS_ONLY ?? 'true') === 'true',
+  },
 };
 
 /**
@@ -129,6 +134,20 @@ export function isExcludedChatName(name) {
   if (!name) return false;
   return EXCLUDE_CHAT_NAME_PATTERNS.some((re) => re.test(name.trim()));
 }
+
+// Pin every lark-cli call to this profile, regardless of the machine's global
+// `currentApp` pointer (~/.lark-cli/config.json) — that pointer is shared
+// machine-wide and got silently flipped to a differently-scoped app once
+// already (2026-09-10). Not env-configurable: inlark is only ever meant to
+// run as this one locked, least-privilege app. See SPEC "Least-privilege scopes".
+export const LARK_CLI_PROFILE = 'larky';
+
+// The one known, trusted open_id for inlark's owner identity on the `larky`
+// profile. Hardcoded — not env-configurable — so the check still fires even
+// with no override set, which is the common case and the exact "larky's
+// keychain got silently repointed" scenario this guards against. Used by
+// assertIdentity() (see lark.js) as the default expected identity at startup.
+export const OWNER_OPEN_ID = 'ou_566409d8a98327b8c8bede5c7df60da4';
 
 // Urgency ordering for sorting / grouping.
 export const URGENCY_ORDER = { high: 0, medium: 1, low: 2 };
