@@ -253,7 +253,7 @@ export function buildDigestCard({ items, since, generatedAt = new Date(), footer
     config: { update_multi: true },
     header: {
       template: 'blue',
-      title: { tag: 'plain_text', content: `📋 Your Triage Digest — ${formatDateTime(now)}` },
+      title: { tag: 'plain_text', content: `📋 Your Digest — ${formatDateTime(now)}` },
     },
     body: { elements },
   };
