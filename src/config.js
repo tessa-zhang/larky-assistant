@@ -111,6 +111,16 @@ export const config = {
     // Skip Saturday/Sunday.
     weekdaysOnly: (process.env.POLL_WEEKDAYS_ONLY ?? 'true') === 'true',
   },
+
+  // One predictable full digest per user each weekday morning. If the laptop
+  // sleeps through `time`, the first scheduler tick after wake catches up until
+  // `cutoff`. Per-user completion is persisted, so restarts cannot double-send.
+  morningDigestEnabled: (process.env.MORNING_DIGEST_ENABLED ?? 'true') === 'true',
+  morningDigest: {
+    time: process.env.MORNING_DIGEST_TIME || '08:00',
+    cutoff: process.env.MORNING_DIGEST_CUTOFF || '12:00',
+    weekdaysOnly: (process.env.MORNING_DIGEST_WEEKDAYS_ONLY ?? 'true') === 'true',
+  },
 };
 
 /**

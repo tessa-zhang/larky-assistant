@@ -3,9 +3,10 @@ import readline from 'node:readline';
 import { config, LARK_CLI_PROFILE, OWNER_OPEN_ID } from './config.js';
 import { getSelf, assertIdentity, sendMessage } from './lark.js';
 import { runDigest, runDone, runSnooze } from './commands.js';
-import { currentSlotId } from './scheduler.js';
+import { currentSlotId, currentMorningDigestDate, localDateKey } from './scheduler.js';
 import { registerUser, lookupUser, loadRegistry } from './users.js';
 import { createKey } from './crypto.js';
+import { runMorningDigestBatch } from './morningDigest.js';
 
 const CLI_FOOTER = '↩ Run `npm run done 2` (or `-- all`) / `npm run snooze 1 3` · `npm run inlark` to refresh';
 const BOT_FOOTER = '↩ Reply `done 2` (or `done all`) / `snooze 1 3` · type `n` to refresh';
@@ -110,6 +111,32 @@ async function cmdListUsers() {
   }
 }
 
+function reportMorningResults(dateKey, results) {
+  for (const result of results) {
+    const label = result.openId || 'registry';
+    if (result.status === 'sent') {
+      console.log(`[morning] ${dateKey} — sent to ${label} (${result.count} item(s))`);
+    } else if (result.status === 'already-sent') {
+      console.log(`[morning] ${dateKey} — already sent to ${label}`);
+    } else if (result.status === 'busy') {
+      console.log(`[morning] ${dateKey} — ${label} busy; will retry`);
+    } else {
+      console.error(`[morning] ${dateKey} — ${label} failed: ${result.error?.message || result.status}`);
+    }
+  }
+}
+
+async function cmdMorning(self) {
+  const dateKey = localDateKey(new Date());
+  const results = await runMorningDigestBatch({
+    owner: self,
+    dateKey,
+    digestsInFlight: new Set(),
+    footerHint: BOT_FOOTER,
+  });
+  reportMorningResults(dateKey, results);
+}
+
 /**
  * Mint a fresh state-encryption key, overwriting the Keychain entry (R17 recovery
  * path — see src/crypto.js). Use when Keychain reports a malformed/unreadable key
@@ -174,7 +201,10 @@ async function cmdListen(self) {
   const pollNote = config.pollEnabled
     ? ` Auto-poll every ${config.poll.intervalMinutes}m, ${config.poll.startHour}:00–${config.poll.endHour}:00${config.poll.weekdaysOnly ? ' weekdays' : ''}.`
     : '';
-  console.log(`Listening for commands from ${self.userName} (DM the bot: "n")… Ctrl+C to stop.${pollNote}`);
+  const morningNote = config.morningDigestEnabled
+    ? ` Morning digest at ${config.morningDigest.time} (wake catch-up until ${config.morningDigest.cutoff}${config.morningDigest.weekdaysOnly ? ', weekdays' : ''}).`
+    : '';
+  console.log(`Listening for commands from ${self.userName} (DM the bot: "n")… Ctrl+C to stop.${pollNote}${morningNote}`);
   // --profile pins this to our app regardless of lark-cli's global active profile
   // (see LARK_CLI_PROFILE in config.js) — this call bypasses lark.js's runRaw, so
   // it needs the same pin applied separately.
@@ -234,6 +264,55 @@ async function cmdListen(self) {
       digestsInFlight.delete(self.openId);
     }
   }, 60_000);
+
+  // One full morning digest per user and local calendar day. A sleeping laptop
+  // simply pauses this timer; on wake, the first tick inside the catch-up window
+  // runs the cohort sequentially. Completion is also persisted per user, so a
+  // listener restart cannot duplicate a successful send.
+  let activeMorningDate = null;
+  let morningBatchRunning = false;
+  const completedMorningUsers = new Set();
+  const runMorningSchedulerTick = async () => {
+    if (!config.morningDigestEnabled || morningBatchRunning) return;
+    let dateKey;
+    try {
+      dateKey = currentMorningDigestDate(new Date(), config.morningDigest);
+    } catch (error) {
+      console.error('[morning] invalid schedule:', error.message);
+      return;
+    }
+    if (!dateKey) return;
+    if (dateKey !== activeMorningDate) {
+      activeMorningDate = dateKey;
+      completedMorningUsers.clear();
+    }
+
+    morningBatchRunning = true;
+    try {
+      const results = await runMorningDigestBatch({
+        owner: self,
+        dateKey,
+        digestsInFlight,
+        footerHint: BOT_FOOTER,
+        completedUserIds: completedMorningUsers,
+      });
+      for (const result of results) {
+        if (result.openId && ['sent', 'already-sent'].includes(result.status)) {
+          completedMorningUsers.add(result.openId);
+        }
+      }
+      reportMorningResults(dateKey, results);
+    } finally {
+      morningBatchRunning = false;
+    }
+  };
+  const scheduleMorningTick = () => {
+    void runMorningSchedulerTick().catch((error) => {
+      console.error('[morning] scheduler failed:', error.message);
+    });
+  };
+  scheduleMorningTick();
+  setInterval(scheduleMorningTick, 60_000);
 
   const rl = readline.createInterface({ input: child.stdout });
   rl.on('line', async (line) => {
@@ -364,10 +443,11 @@ async function main() {
     case 'done': return cmdDone(self, args);
     case 'snooze': return cmdSnooze(self, args);
     case 'listen': return cmdListen(self);
+    case 'morning': return cmdMorning(self);
     case 'adduser': return cmdAddUser(args);
     case 'listusers': return cmdListUsers();
     default:
-      console.error(`Unknown command: ${command}\nUsage: digest [--user <open_id>] | done <n…> | snooze <n…> | listen | adduser <open_id> <home> [name] | listusers | reset-key --yes\n  (npm scripts: npm run inlark [-- --user <id>] | npm run done -- <n…> | npm run snooze -- <n…> | npm run listen | npm run adduser -- <open_id> <home> [name] | npm run listusers | npm run reset-key -- --yes)`);
+      console.error(`Unknown command: ${command}\nUsage: digest [--user <open_id>] | morning | done <n…> | snooze <n…> | listen | adduser <open_id> <home> [name] | listusers | reset-key --yes\n  (npm scripts: npm run inlark [-- --user <id>] | npm run morning | npm run done -- <n…> | npm run snooze -- <n…> | npm run listen | npm run adduser -- <open_id> <home> [name] | npm run listusers | npm run reset-key -- --yes)`);
       process.exit(1);
   }
 }

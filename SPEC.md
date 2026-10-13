@@ -349,6 +349,24 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       default), not the self-chat R12 originally assumed. **Still open from R12's original scope:**
       no `launchd`/boot-persistence — `listen` still has to be kept running manually (nohup today);
       see the Roadmap entry.
+- [x] **R12 weekday cohort morning digest + process supervision** *(2026-10-13)*:
+      `listen` now sends the existing full prioritised digest to the owner **and every registered
+      user** once per weekday at **08:00 local**, or on the first wake afterward through a **12:00
+      cutoff**. This is deliberately a time-based daily briefing, not another frequency setting and
+      not R22's future one-day FYI TLDR. `lastMorningDigestDate` is persisted per user, so sleep/wake
+      cycles and listener restarts cannot duplicate a successful send; runs are sequential, share the
+      existing per-user in-flight guard, and freshly re-resolve + assert every guest's isolated HOME
+      before reading. One user's failure is contained and retried without blocking the cohort. Added
+      `npm run morning` as a stopped-listener fallback plus a user-level launchd manager
+      (`service:install|status|logs|uninstall`) with `RunAtLoad` + `KeepAlive` + restart throttling —
+      no admin, no sleep override, no unlocked-session requirement. The honest device boundary
+      remains: nothing runs while the undocked Mac sleeps; launchd restores the process and the
+      scheduler catches up after wake. Unit-tested; live timed wake test pending.
+- [x] **R12 morning-card presentation** *(approved 2026-10-13)*: scheduled morning
+      cards use `☀️ Your Morning Digest — Tue 13 Oct, 8:30am`, followed by the existing
+      prioritised content. Manual `n` cards retain the regular `📋 Your Digest` heading;
+      done/snooze rerenders retain whichever heading the delivered card used. Tessa approved the
+      owner-only visual preview before the listener restart.
 
 **🔜 Next** (detail in [Roadmap](#roadmap)) — **R2 single-user bot is LIVE (2026-08-04);** the cohort
 build is now gated on an assessment. (R8's interim 7d bump shipped 2026-07-02; fuller stable-anchor design
@@ -438,10 +456,11 @@ parked, not blocking.)
       device-code walkthrough run by the owner; (4) always-on host (ties to R12). **R17 (data
       minimization) remains explicitly open** — unaffected by this build.
 - [ ] **R12 — Beta scheduling & host** (self-beta, added 2026-07-02; near-term, precedes R2's
-      always-on host): **the scheduling half shipped 2026-09-30** — see the ✅ tracker entry above
-      (auto-poll inside `listen`, 4h/weekday/10–18h, change-gated, bot delivery). **Still open:**
-      the "host" half — `listen` still needs to be kept running manually (no `launchd`/boot
-      persistence yet); that's the pragmatic stopgap before R2 item (4) and remains not built.
+      always-on host): scheduling now includes both the 2026-09-30 periodic poll and the
+      **2026-10-13 cohort morning digest**; user-level launchd process supervision is built and awaits
+      a live wake test. **Still open:** a genuinely always-awake host. launchd restarts crashes/login
+      sessions but cannot execute while an undocked MacBook sleeps, so this closes the practical
+      morning-beta workflow, not R2's infrastructure requirement.
 - [ ] **R8 — Dynamic lookback** (to design; **interim shipped 2026-07-02**): the fixed window's
       default was bumped **72h→168h (7d)** as the pragmatic ~80%-of-the-value step — a week matches
       most people's clear-out rhythm, and it stays a **user-varyable knob** (the ideal range is
@@ -1476,11 +1495,18 @@ differs from the plan below in two ways, now that reality had caught up with it:
   for hourly, but a *shorter-than-hourly* cadence (30min was tried first) would post frequent
   near-duplicate cards that bury the latest one, hence both the gate and the conservative 4h start.
   `POLL_INTERVAL_MINUTES` is the knob to shrink later.
-- **Delivery + host:** follows `SEND_AS` (bot by default today, not self-chat — the bot surface
-  didn't exist yet when this was written) via the **same in-process timer inside `listen`**
-  described below (that part of the proposed architecture held up). The **host** half — `launchd`
-  supervision so `listen` survives reboots/crashes unattended — is **not built**; `listen` is still
-  kept running manually (nohup + log redirect). That remains the open part of R12.
+- **Delivery + host (status as of 2026-09-30, superseded below):** followed `SEND_AS` via the
+  in-process timer, while `listen` was still kept running manually. The 2026-10-13 morning path and
+  user LaunchAgent below replace that operating model.
+
+**✅ Weekday cohort morning path shipped in code (2026-10-13; live wake test pending).** The beta
+need sharpened from "poll while the laptop happens to be awake" to a predictable morning briefing
+for every onboarded user. `listen` now runs the existing full digest once per user at 08:00 local,
+or on first wake through 12:00, with a persisted per-user calendar key preventing duplicates across
+wake/restart. Runs are sequential and every guest is freshly identity-asserted under their isolated
+HOME. A repo-managed user LaunchAgent adds login start + crash restart without admin access or an
+unlocked desktop. It intentionally does not prevent sleep; no send can occur until the Mac wakes.
+This is the practical laptop-only workaround, not an always-on host and not R22's FYI TLDR.
 
 **Host decision (2026-07-02): laptop-only, awake — no always-on host yet.** A closed-lid MacBook
 sleeps, so scheduled jobs don't fire and the `listen` WS drops. Workarounds were weighed and
@@ -1493,14 +1519,14 @@ event listener"); R12 is explicitly the stopgap before it. Use **`launchd`, not 
 `StartCalendarInterval`/`StartInterval` **run a missed job on next wake**, which is exactly
 "when the laptop is awake" semantics; `cron` silently skips anything scheduled during sleep.
 
-**Cadence decision (2026-07-02): fire the digest on a fixed interval, default hourly — as a new
+**Historical cadence decision (2026-07-02, superseded 2026-10-13): fire the digest on a fixed interval, default hourly — as a new
 user-facing env knob.** The stateless re-surfacing (every run re-pushes the current backlog — a
 run marks nothing read) is **not a concern here**: Tessa's incoming-message frequency means the
 card genuinely differs most hours, so no change-gate build — just push on the interval. Frequency
 is a **per-user env var** (people want different reaches) — e.g. `DIGEST_INTERVAL_MINUTES`
 (default 60). Daily start anchor **10:30am** (office arrival; was 8am).
 
-**Proposed architecture — fold the scheduler into the listener (one supervised process):** instead
+**Architecture retained — fold the scheduler into the listener (one supervised process):** instead
 of a separate `cron`/`launchd` job racing the listener, have the **`listen` process self-trigger a
 digest on an internal interval** read from the env knob. This (a) makes frequency a true runtime
 var, (b) routes the scheduled digest through the **existing per-listener in-flight guard**, so a
@@ -1523,7 +1549,8 @@ works today, no bot provisioning; the bot surface is the R2 upgrade.
 - **Supervision UX:** how I see it's alive / restart it without an IDE (a `doctor`-style status? a
   menubar item?) — matters more once it's meant to be unattended.
 
-**Not building yet — captured on Tessa's call (2026-07-02).** Graduates to the tracker when built.
+**2026-10-13 outcome:** the in-process schedule + user-level launchd supervision described above are
+built, with the revised once-daily multi-user semantics. A genuinely always-awake host remains open.
 
 ### R13 — In-Lark interactive triggers: refresh button + bot menu (added 2026-07-09)
 

@@ -14,7 +14,8 @@ import { buildDigestCard, previewText } from '../src/buildCard.js';
 import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, load, save } from '../src/state.js';
 import { numberItems, pollSignature } from '../src/commands.js';
 import { encrypt, decrypt, isEncrypted, _setKeyForTests } from '../src/crypto.js';
-import { currentSlotId } from '../src/scheduler.js';
+import { currentSlotId, currentMorningDigestDate, localDateKey } from '../src/scheduler.js';
+import { runMorningDigestBatch } from '../src/morningDigest.js';
 
 const NOW = new Date('2026-06-16T12:00:00Z');
 
@@ -500,13 +501,19 @@ test('load/save isolate state per user — one user\'s done/digest never touches
   await rm(dir, { recursive: true, force: true }); // clean slate
   process.env.STATE_DIR = dir;                     // stateDir() is lazy → override applies
   try {
-    await save('ou_A', { doneMessageIds: ['om_a'], lastDigest: { items: [{ n: 1, messageId: 'om_a' }] } });
+    await save('ou_A', {
+      doneMessageIds: ['om_a'],
+      lastMorningDigestDate: '2026-10-12',
+      lastDigest: { items: [{ n: 1, messageId: 'om_a' }] },
+    });
     await save('ou_B', { doneMessageIds: ['om_b'], lastDigest: { items: [{ n: 1, messageId: 'om_b' }] } });
 
     const a = await load('ou_A');
     const b = await load('ou_B');
     assert.deepEqual(a.doneMessageIds, ['om_a']);            // A sees only A
     assert.deepEqual(b.doneMessageIds, ['om_b']);            // B sees only B
+    assert.equal(a.lastMorningDigestDate, '2026-10-12');      // daily-send idempotency survives restart
+    assert.equal(b.lastMorningDigestDate, null);              // and remains isolated per user
     assert.equal(a.lastDigest.items[0].messageId, 'om_a');   // `done`/`done all` resolve against
     assert.equal(b.lastDigest.items[0].messageId, 'om_b');   // each user's OWN snapshot
 
@@ -570,6 +577,78 @@ test('currentSlotId gates on weekday + window, and is stable within a slot / adv
   assert.equal(currentSlotId(sat, { ...opts, weekdaysOnly: false }) !== null, true);
 });
 
+test('currentMorningDigestDate waits until 08:00, catches up after sleep, and stops at cutoff', () => {
+  const schedule = { time: '08:00', cutoff: '12:00', weekdaysOnly: true };
+  const local = (day, hour, minute) => new Date(2026, 9, day, hour, minute);
+
+  assert.equal(currentMorningDigestDate(local(12, 7, 59), schedule), null); // Monday, too early
+  assert.equal(currentMorningDigestDate(local(12, 8, 0), schedule), '2026-10-12');
+  assert.equal(currentMorningDigestDate(local(12, 10, 37), schedule), '2026-10-12'); // wake catch-up
+  assert.equal(currentMorningDigestDate(local(12, 12, 0), schedule), '2026-10-12');
+  assert.equal(currentMorningDigestDate(local(12, 12, 1), schedule), null);
+  assert.equal(currentMorningDigestDate(local(11, 9, 0), schedule), null); // Sunday
+  assert.equal(localDateKey(local(12, 8, 0)), '2026-10-12');
+});
+
+test('currentMorningDigestDate rejects invalid or backwards windows', () => {
+  const now = new Date(2026, 9, 12, 9, 0);
+  assert.throws(
+    () => currentMorningDigestDate(now, { time: '8am', cutoff: '12:00', weekdaysOnly: true }),
+    /MORNING_DIGEST_TIME must be HH:MM/,
+  );
+  assert.throws(
+    () => currentMorningDigestDate(now, { time: '13:00', cutoff: '12:00', weekdaysOnly: true }),
+    /CUTOFF must be at or after/,
+  );
+});
+
+test('runMorningDigestBatch runs users sequentially, isolates identity failures, and skips completed users', async () => {
+  const calls = [];
+  let activeRuns = 0;
+  let maxActiveRuns = 0;
+  const services = {
+    loadRegistry: async () => ({
+      ou_good: { home: '/good', userName: 'Good' },
+      ou_wrong: { home: '/wrong', userName: 'Wrong' },
+      ou_done: { home: '/done', userName: 'Done' },
+    }),
+    getSelf: async (home) => ({
+      openId: home === '/wrong' ? 'ou_someone_else' : `ou_${home.slice(1)}`,
+      userName: home,
+      home,
+    }),
+    assertIdentity: (resolved, expected) => {
+      if (resolved.openId !== expected) throw new Error('identity mismatch');
+    },
+    runDigest: async (args) => {
+      activeRuns += 1;
+      maxActiveRuns = Math.max(maxActiveRuns, activeRuns);
+      calls.push(args);
+      await Promise.resolve();
+      activeRuns -= 1;
+      return { count: 3 };
+    },
+  };
+
+  const results = await runMorningDigestBatch({
+    owner: { openId: 'ou_owner', userName: 'Owner' },
+    dateKey: '2026-10-12',
+    digestsInFlight: new Set(),
+    footerHint: 'footer',
+    completedUserIds: new Set(['ou_done']),
+  }, services);
+
+  assert.equal(maxActiveRuns, 1);
+  assert.deepEqual(calls.map((call) => call.self.openId), ['ou_owner', 'ou_good']);
+  assert.ok(calls.every((call) => call.morningDigestDate === '2026-10-12'));
+  assert.ok(calls.every((call) => call.delivery.as === 'bot'));
+  assert.deepEqual(results.map((result) => [result.openId, result.status]), [
+    ['ou_owner', 'sent'],
+    ['ou_good', 'sent'],
+    ['ou_wrong', 'failed'],
+  ]);
+});
+
 test('pollSignature is a sorted, deduped fingerprint of the current unread set', () => {
   assert.deepEqual(pollSignature([{ messageId: 'om_b' }, { messageId: 'om_a' }]), ['om_a', 'om_b']);
   assert.deepEqual(pollSignature([{ messageId: 'om_a' }, { messageId: 'om_a' }]), ['om_a']); // one bundle, dup rows
@@ -607,6 +686,17 @@ test('buildDigestCard lists ALL low items (no cap) collapsed behind the panel', 
   const panel = card.body.elements.find((e) => e.tag === 'collapsible_panel' && /LOW \/ FYI/.test(JSON.stringify(e.header)));
   assert.ok(panel);
   assert.ok(JSON.stringify(panel.elements).includes('chatter 14'));
+});
+
+test('buildDigestCard gives morning runs their own exact title without changing regular runs', () => {
+  const generatedAt = new Date(2026, 9, 13, 8, 30);
+  const base = { items: [], since: generatedAt, generatedAt };
+
+  const morning = buildDigestCard({ ...base, variant: 'morning' });
+  assert.equal(morning.header.title.content, '☀️ Your Morning Digest — Tue 13 Oct, 8:30am');
+
+  const regular = buildDigestCard(base);
+  assert.equal(regular.header.title.content, '📋 Your Digest — Tue 13 Oct, 8:30 am');
 });
 
 test('buildDigestCard (R3) collapses ONLY low/FYI behind a panel; high/medium stay flat', () => {

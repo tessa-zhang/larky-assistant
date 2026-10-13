@@ -66,11 +66,29 @@ function startWindow() {
  * Full digest run: fetch → classify → card. Persists lastRunAt + a snapshot of
  * the delivered items so done/snooze can act without re-fetching.
  */
-export async function runDigest({ self, delivery, footerHint, ack = false, requireChange = false }) {
+export async function runDigest({
+  self,
+  delivery,
+  footerHint,
+  ack = false,
+  requireChange = false,
+  morningDigestDate = null,
+}) {
   const state = store.clearExpiredSnoozes(await store.load(self.openId));
+  if (morningDigestDate && state.lastMorningDigestDate === morningDigestDate) {
+    return {
+      count: state.lastDigest?.items?.length || 0,
+      sent: false,
+      reason: 'already-sent',
+      skipped: {},
+    };
+  }
   const since = startWindow();
   const sinceDate = new Date(since); // fixed lookback window start
   const runAt = new Date();
+  // Strict title boundary: only the actual scheduled morning path supplies a
+  // morningDigestDate. Manual `n`, CLI runs, polls, and fallbacks stay standard.
+  const resolvedCardVariant = morningDigestDate ? 'morning' : 'standard';
 
   if (ack) await deliver(delivery, '⏳ Priotising your mentions, give me a moment…');
 
@@ -94,7 +112,8 @@ export async function runDigest({ self, delivery, footerHint, ack = false, requi
   if (items.length === 0) {
     await deliver(delivery, `✅ You're all caught up! No new unread mentions or DMs since ${formatDate(sinceDate)}.`);
     state.lastRunAt = runAt.toISOString();
-    state.lastDigest = { generatedAt: runAt.toISOString(), since, items: [] };
+    if (morningDigestDate) state.lastMorningDigestDate = morningDigestDate;
+    state.lastDigest = { generatedAt: runAt.toISOString(), since, items: [], cardVariant: resolvedCardVariant };
     await store.save(self.openId, state);
     return { count: 0, skipped };
   }
@@ -129,11 +148,23 @@ export async function runDigest({ self, delivery, footerHint, ack = false, requi
   // field the next person adds without realising it also needs to be preserved here.
   for (const it of items) { delete it.bundle; delete it.cacheKey; delete it.fallback; }
 
-  const card = buildDigestCard({ items, since: sinceDate, generatedAt: runAt, footerHint });
+  const card = buildDigestCard({
+    items,
+    since: sinceDate,
+    generatedAt: runAt,
+    footerHint,
+    variant: resolvedCardVariant,
+  });
   await deliver(delivery, card, 'interactive');
 
   state.lastRunAt = runAt.toISOString();
-  state.lastDigest = { generatedAt: runAt.toISOString(), since, items };
+  if (morningDigestDate) state.lastMorningDigestDate = morningDigestDate;
+  state.lastDigest = {
+    generatedAt: runAt.toISOString(),
+    since,
+    items,
+    cardVariant: resolvedCardVariant,
+  };
   await store.save(self.openId, state);
   return { count: items.length, skipped };
 }
@@ -172,6 +203,7 @@ async function rerender(userId, state, delivery, footerHint) {
     since: state.lastDigest.since ? new Date(state.lastDigest.since) : null,
     generatedAt: new Date(),
     footerHint,
+    variant: state.lastDigest.cardVariant || 'standard',
   });
   await deliver(delivery, card, 'interactive');
 }

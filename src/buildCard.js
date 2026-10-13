@@ -169,6 +169,13 @@ function collapsedPanel(meta, bucket, now) {
   };
 }
 
+function digestTitle(variant, now) {
+  const generatedLabel = formatDateTime(now);
+  return variant === 'morning'
+    ? `☀️ Your Morning Digest — ${generatedLabel.replace(/\s([ap]m)$/i, '$1')}`
+    : `📋 Your Digest — ${generatedLabel}`;
+}
+
 /**
  * Build a Lark interactive card (schema 2.0) from numbered, classified items.
  * `items` must each carry: n, urgency, category, summary, chatName, isDM,
@@ -184,7 +191,7 @@ function collapsedPanel(meta, bucket, now) {
  *     panel at the bottom (2026-08-11). Automated pings stay visible without competing
  *     with human asks; the header count shows how many without expanding.
  */
-export function buildDigestCard({ items, since, generatedAt = new Date(), footerHint }) {
+export function buildDigestCard({ items, since, generatedAt = new Date(), footerHint, variant = 'standard' }) {
   const now = generatedAt;
 
   // Bot/app rows are pulled out FIRST — an automated row goes to the bot section
@@ -253,7 +260,7 @@ export function buildDigestCard({ items, since, generatedAt = new Date(), footer
     config: { update_multi: true },
     header: {
       template: 'blue',
-      title: { tag: 'plain_text', content: `📋 Your Digest — ${formatDateTime(now)}` },
+      title: { tag: 'plain_text', content: digestTitle(variant, now) },
     },
     body: { elements },
   };

@@ -52,10 +52,11 @@ npm run listen      # long-running WebSocket listener
 # then DM the bot in Lark: "n"
 ```
 
-`listen` also **auto-polls** in the background (default every 4h, weekdays,
-10:00–18:00 local) and sends a fresh card **only when your unread set has
-changed** since the last check — so you don't have to type `n` to stay
-current. Tune or disable via `POLL_*` in `.env.example`.
+`listen` sends every onboarded user one **weekday morning digest** at 08:00
+local. If the Mac is asleep, it catches up on the first wake through 12:00;
+each user's completion date is persisted so wakeups and restarts cannot
+double-send. The older change-gated periodic poll remains available through
+`POLL_*`, but is disabled in the current beta configuration.
 
 ## Setup
 
@@ -99,12 +100,38 @@ When that succeeds, set `SEND_AS=bot` and run `npm run listen`.
 |---|---|
 | `npm run inlark` | Fetch currently-unread mentions+DMs (last 7 days), classify, deliver card |
 | `npm run inlark -- --user <open_id>` | Testing hook: run the digest for a registered non-owner user instead of yourself (see Multi-user below) |
+| `npm run morning` | Immediately run today's deduplicated morning batch for all onboarded users; use only while the listener service is stopped |
 | `npm run done -- <n…>` | Mark card items done (never reappear) |
 | `npm run snooze -- <n…>` | Hide items for `SNOOZE_HOURS` (default 24h) |
-| `npm run listen` | Bot mode: react to `n` / `done` / `snooze` DMs + auto-poll on a schedule |
+| `npm run listen` | Bot mode: react to `n` / `done` / `snooze` DMs + run configured schedules |
 | `npm run adduser -- <open_id> <home-path> [userName]` | Register a teammate (see Multi-user below) |
 | `npm run listusers` | List registered non-owner users |
 | `npm run reset-key -- --yes` | Rotate the state-encryption key in Keychain (recovery, see Privacy below) |
+
+## Start automatically with launchd
+
+The user-level launchd service starts `listen` after login and restarts it if
+Node or the Lark event consumer exits. It requires no administrator access and
+the Mac can remain locked. It does **not** prevent system sleep: a sleeping Mac
+cannot send, so the morning scheduler catches up after wake.
+
+Stop any manually running `npm run listen`, then install and inspect the service:
+
+```bash
+npm run service:install
+npm run service:status
+npm run service:logs
+```
+
+`service:install` is idempotent and also restarts the service after `.env` or
+code changes. It writes `~/Library/LaunchAgents/com.inlark.listener.plist` and
+logs to `~/Library/Logs/inlark/`; neither contains message content or secrets.
+Remove the service with `npm run service:uninstall` (logs are retained).
+
+For a same-day test, set `MORNING_DIGEST_TIME` a few minutes ahead and
+`MORNING_DIGEST_CUTOFF` later than that, then run `npm run service:install`.
+The test sends to the full onboarded cohort, so announce it first. Restore
+`08:00` / `12:00` afterward and reinstall once more.
 
 ## Privacy / data at rest (R17)
 
@@ -170,7 +197,9 @@ can use the already-running listener without a restart.
 src/
 ├── index.js        # CLI dispatch + WebSocket listener
 ├── config.js       # constants, noise-exclusion patterns
-├── state.js        # state.json: lastRun, done, snooze, last-digest snapshot
+├── state.js        # per-user run/done/snooze/digest state
+├── scheduler.js    # periodic slots + sleep-aware morning window
+├── morningDigest.js# sequential, identity-checked cohort morning run
 ├── lark.js         # lark-cli exec wrapper
 ├── fetchMentions.js# messages-search: unread @mentions (group) + DMs (p2p), one row per chat
 ├── classify.js     # chunked LiteLLM calls (20/call, concurrent) → urgency/category/summary

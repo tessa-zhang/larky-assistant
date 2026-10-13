@@ -37,6 +37,9 @@ const EMPTY_STATE = {
   // external change to the next tick. null until the first poll runs.
   lastPollSignature: null,
   lastPollAt: null,
+  // Local YYYY-MM-DD of the last successfully delivered weekday morning
+  // digest. Opaque scheduling metadata; content remains confined to lastDigest.
+  lastMorningDigestDate: null,
   // Snapshot of the most recently delivered digest, so `done`/`snooze` can map
   // the numbers shown on the card to message_ids and re-render WITHOUT another
   // fetch/classify round-trip. Fields are kept to the minimum the renderer +

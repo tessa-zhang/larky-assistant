@@ -9,6 +9,7 @@
   },
   "scripts": {
     "inlark": "node src/index.js digest",
+    "morning": "node src/index.js morning",
     "done": "node src/index.js done",
     "snooze": "node src/index.js snooze",
     "listen": "node src/index.js listen",
@@ -16,6 +17,10 @@
     "listusers": "node src/index.js listusers",
     "reset-key": "node src/index.js reset-key",
     "probe-models": "node src/probeModels.js",
+    "service:install": "node scripts/launchd.js install",
+    "service:status": "node scripts/launchd.js status",
+    "service:logs": "node scripts/launchd.js logs",
+    "service:uninstall": "node scripts/launchd.js uninstall",
     "test": "node --test"
   },
   "dependencies": {
