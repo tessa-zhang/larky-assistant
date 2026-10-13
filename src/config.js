@@ -14,8 +14,13 @@ export const config = {
   // only as a manual CLI fallback. See .env.example.
   sendAs: (process.env.SEND_AS || 'bot').toLowerCase(),
 
-  // Claude model for classification.
-  model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+  // Model for classification, as named on Traveloka's LiteLLM allow-list.
+  // Classify.js now talks to LiteLLM's OpenAI-compatible endpoint, so this
+  // can be ANY provider the key is allow-listed for — Claude, GPT, Gemini,
+  // DeepSeek, etc. (var kept as CLAUDE_MODEL for backwards compat with
+  // existing .env files; it's a historical label, not a provider lock-in.)
+  // Run `npm run probe-models` to list ids this key can actually hit.
+  model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
 
   // Fixed lookback window for every run: each digest scans the last N hours for
   // CURRENTLY-unread mentions/DMs — independent of when you last ran it. Running
@@ -39,17 +44,14 @@ export const config = {
   // Soft cap on messages fetched per run (rate-limit guard).
   maxMessages: Number(process.env.MAX_MESSAGES || 200),
 
+  // LiteLLM proxy credentials for classification — Traveloka's IT-listed
+  // AI gateway. Both required; classify.js sends anthropicApiKey as a Bearer
+  // token against LiteLLM's OpenAI-compatible /v1/chat/completions endpoint.
+  // Field names kept as anthropic* for backwards compat with existing .env
+  // files — they're historical labels, the endpoint is provider-agnostic.
+  // Missing either degrades classification to the heuristic-free low/fyi
+  // fallback rather than crashing. See SPEC "Privacy & data handling".
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
-
-  // Inference endpoint for classification. Empty = the Anthropic API directly,
-  // which is what the privacy guarantee in SPEC "Privacy & data handling" is
-  // written against. Set this ONLY to an IT-approved gateway that fronts the
-  // Anthropic API (LiteLLM is on Traveloka's listed set and requires exactly this
-  // override). Message text goes wherever this points, so a non-default value
-  // moves colleagues' Lark content to a third party — check with IT/Security
-  // before setting it, and update the SPEC/README privacy note if you do.
-  // classify.js logs the endpoint on every run that uses a non-default value, so
-  // the data path is never silent.
   anthropicBaseUrl: (process.env.ANTHROPIC_BASE_URL || '').trim(),
 
   // Characters of the verbatim message shown beneath the AI summary on each card

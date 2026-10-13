@@ -409,11 +409,17 @@ test('previewText strips markup/placeholders, collapses whitespace, truncates', 
   assert.equal(previewText(''), '');
 });
 
-test('extractJson handles bare, fenced, and prefaced arrays; throws otherwise', () => {
+test('extractJson handles complete, fenced, malformed, and truncated arrays', () => {
   assert.deepEqual(extractJson('[{"a":1}]'), [{ a: 1 }]);
   assert.deepEqual(extractJson('```json\n[{"a":1}]\n```'), [{ a: 1 }]);
   assert.deepEqual(extractJson('Here you go: [1,2,3] — done'), [1, 2, 3]);
+  assert.deepEqual(extractJson('[{"a":1,},{"a":2,},]'), [{ a: 1 }, { a: 2 }]);
+  assert.deepEqual(
+    extractJson('[{"a":1},{"a":"brace } in string"},{"a":'),
+    [{ a: 1 }, { a: 'brace } in string' }],
+  );
   assert.throws(() => extractJson('no array here'));
+  assert.throws(() => extractJson('[{"a":'));
 });
 
 test('systemPrompt is name-aware and encodes actor-relative urgency (named ≠ asked)', () => {
@@ -422,6 +428,14 @@ test('systemPrompt is name-aware and encodes actor-relative urgency (named ≠ a
   assert.ok(/named/i.test(p) && /asked/i.test(p)); // the "named ≠ asked" crux rule
   assert.ok(/routing/i.test(p));                   // routing/FYI notes are down-ranked
   assert.ok(systemPrompt().includes('the user'));  // graceful fallback without a name
+});
+
+test('systemPrompt protects a direct ask from being swamped by a cc:/fyi: prefix or thread framing', () => {
+  const p = systemPrompt('Tessa');
+  assert.match(p, /Direct ask always wins/);       // the carve-out header
+  assert.match(p, /"cc:"/);                        // the specific lexical cue is called out
+  assert.match(p, /not a veto/i);                  // the prefix is weak evidence, not a demotion rule
+  assert.match(p, /buried in a long thread/i);     // framing dilution is called out explicitly
 });
 
 test('snooze hides items, then clearExpiredSnoozes releases the expired ones', () => {
