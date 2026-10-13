@@ -10,9 +10,9 @@ import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThrea
 import { reactedIdsFromDetails, assertIdentity, scopedEnv } from '../src/lark.js';
 import { registerUser, loadRegistry, lookupUser } from '../src/users.js';
 import { extractJson, systemPrompt, buildClient } from '../src/classify.js';
-import { buildDigestCard, previewText } from '../src/buildCard.js';
+import { buildDigestCard, buildFallbackDigestCard, previewText } from '../src/buildCard.js';
 import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, load, save } from '../src/state.js';
-import { numberItems, pollSignature } from '../src/commands.js';
+import { numberItems, numberFallbackItems, pollSignature } from '../src/commands.js';
 import { encrypt, decrypt, isEncrypted, _setKeyForTests } from '../src/crypto.js';
 import { currentSlotId, currentMorningDigestDate, localDateKey } from '../src/scheduler.js';
 import { runMorningDigestBatch } from '../src/morningDigest.js';
@@ -204,6 +204,24 @@ test('numberItems: EVERY human item sorts above every bot/app one (own section),
   assert.ok(items.indexOf(botHigh) > items.indexOf(humanMed));
   // Numbering runs monotonically down the card so done/snooze refs line up.
   assert.deepEqual(items.map((it) => it.n), [1, 2, 3, 4]);
+});
+
+test('numberFallbackItems groups DMs before @ mentions and uses recency only within each group', () => {
+  const at = (hour) => new Date(`2026-10-13T${hour}:00:00Z`);
+  const items = [
+    { messageId: 'mention-new', isDM: false, createTime: at('12') },
+    { messageId: 'dm-old', isDM: true, createTime: at('08') },
+    { messageId: 'dm-new', isDM: true, createTime: at('10') },
+    { messageId: 'mention-old', isDM: false, createTime: at('09') },
+  ];
+
+  numberFallbackItems(items);
+  assert.deepEqual(items.map((item) => [item.n, item.messageId]), [
+    [1, 'dm-new'],
+    [2, 'dm-old'],
+    [3, 'mention-new'],
+    [4, 'mention-old'],
+  ]);
 });
 
 test('groupRows carries the bundle\'s STRONGEST directedness (fewest tagged), not the latest message\'s', () => {
@@ -697,6 +715,43 @@ test('buildDigestCard gives morning runs their own exact title without changing 
 
   const regular = buildDigestCard(base);
   assert.equal(regular.header.title.content, '📋 Your Digest — Tue 13 Oct, 8:30 am');
+});
+
+test('buildFallbackDigestCard is compact, transparent, and contains no priority treatment', () => {
+  const items = [
+    {
+      n: 1, isDM: true, urgency: 'low', category: 'fyi', summary: 'must never render',
+      chatName: 'Bob', senderName: 'Bob', text: 'Can you review this?', chatUnreadCount: 1,
+      link: 'https://dm', createTime: NOW,
+    },
+    {
+      n: 2, isDM: false, urgency: 'low', category: 'fyi', summary: 'also must never render',
+      chatName: 'Ops', senderName: 'Alice', text: '@Tessa please check the rollout',
+      chatUnreadCount: 2, link: 'https://mention', createTime: NOW,
+      taggedCount: 1, myTagPosition: 1,
+    },
+  ];
+  const card = buildFallbackDigestCard({
+    items,
+    since: NOW,
+    generatedAt: NOW,
+    variant: 'morning',
+    footerHint: 'hint',
+  });
+  const text = JSON.stringify(card);
+
+  assert.equal(card.header.title.content.startsWith('☀️ Your Morning Digest'), true);
+  assert.ok(text.includes(
+    "Looks like I couldn't get to my back office to prioritise your digest, but here's a useful summary anyway:",
+  ));
+  const panels = card.body.elements.filter((element) => element.tag === 'collapsible_panel');
+  assert.equal(panels.length, 2);
+  assert.ok(JSON.stringify(panels[0].header).includes('DMs'));
+  assert.ok(JSON.stringify(panels[1].header).includes('@ MENTIONS'));
+  assert.ok(text.includes('Can you review this?'));
+  assert.ok(text.includes('@Tessa please check the rollout'));
+  assert.ok(!text.includes('must never render'));
+  assert.doesNotMatch(text, /🟢|LOW \/ FYI|HIGH PRIORITY|MEDIUM|· Action|· FYI/);
 });
 
 test('buildDigestCard (R3) collapses ONLY low/FYI behind a panel; high/medium stay flat', () => {

@@ -126,6 +126,29 @@ function itemBlock(item, now, { expandable = false } = {}) {
   return elements;
 }
 
+/**
+ * Compact, classification-free row for the degraded card. It deliberately omits
+ * urgency, Action/FYI, and AI summary fields: those are precisely the judgements
+ * we do not have when classification falls back. The verbatim excerpt + jump link
+ * still let the user triage the message themselves.
+ */
+function fallbackItemBlock(item, now) {
+  const ago = relativeTime(item.createTime, now);
+  const name = item.chatName || item.senderName || (item.isDM ? 'Direct message' : 'Group chat');
+  const broadcast = item.isBroadcast ? ' · 📣 @all' : '';
+  const tag = !item.isDM && item.myTagPosition
+    ? (item.taggedCount === 1 ? ' · 🎯 you only' : ` · 👥 you ${item.myTagPosition}/${item.taggedCount}`)
+    : '';
+  const more = item.chatUnreadCount > 1 ? ` · +${item.chatUnreadCount - 1} more` : '';
+  const bot = isAutomatedSender(item) ? ' · bot' : '';
+  const header = `**${item.n}. [${md(name)}]**${bot}${broadcast}${tag}${ago ? ` · ${ago}` : ''}${more}`;
+  const raw = previewText(item.text, config.rawPreviewChars);
+  const rawLine = raw ? `\n💬 ${item.isDM ? '' : `**${md(item.senderName)}:** `}${md(raw)}` : '';
+  const elements = [{ tag: 'markdown', content: `${header}${rawLine}` }];
+  if (item.link) elements.push(jumpButton(item.link));
+  return elements;
+}
+
 /** Section title line, e.g. "🟢 **LOW / FYI**  (12)". */
 function sectionTitle(meta, count) {
   return `${meta.emoji} **${meta.label}**  (${count})`;
@@ -169,11 +192,70 @@ function collapsedPanel(meta, bucket, now) {
   };
 }
 
+function fallbackPanel({ emoji, label }, bucket, now) {
+  const elements = [];
+  for (const item of bucket) elements.push(...fallbackItemBlock(item, now));
+  return {
+    tag: 'collapsible_panel',
+    expanded: false,
+    header: {
+      title: { tag: 'markdown', content: `${emoji} **${label}**  (${bucket.length})` },
+      vertical_align: 'center',
+      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '16px 16px' },
+      icon_position: 'right',
+      icon_expanded_angle: -180,
+    },
+    elements,
+  };
+}
+
 function digestTitle(variant, now) {
   const generatedLabel = formatDateTime(now);
   return variant === 'morning'
     ? `☀️ Your Morning Digest — ${generatedLabel.replace(/\s([ap]m)$/i, '$1')}`
     : `📋 Your Digest — ${generatedLabel}`;
+}
+
+/**
+ * Useful degraded mode when any classifier result falls back. The initial card
+ * stays short even for a large inbox: DMs and @ mentions are separate collapsed
+ * panels, while every message remains reachable with its verbatim excerpt and link.
+ */
+export function buildFallbackDigestCard({ items, since, generatedAt = new Date(), footerHint, variant = 'standard' }) {
+  const dms = items.filter((item) => item.isDM);
+  const mentions = items.filter((item) => !item.isDM);
+  const elements = [
+    {
+      tag: 'markdown',
+      content: "Looks like I couldn't get to my back office to prioritise your digest, but here's a useful summary anyway:",
+    },
+    {
+      tag: 'markdown',
+      content: `Showing **${dms.length}** DM${dms.length === 1 ? '' : 's'} and **${mentions.length}** @ mention${mentions.length === 1 ? '' : 's'} ${sinceText(since)}`,
+    },
+  ];
+
+  if (dms.length) {
+    elements.push({ tag: 'hr' });
+    elements.push(fallbackPanel({ emoji: '💬', label: 'DMs' }, dms, generatedAt));
+  }
+  if (mentions.length) {
+    elements.push({ tag: 'hr' });
+    elements.push(fallbackPanel({ emoji: '🔔', label: '@ MENTIONS' }, mentions, generatedAt));
+  }
+
+  elements.push({ tag: 'hr' });
+  elements.push({ tag: 'markdown', content: footerHint || '↩ type `digest` to refresh' });
+
+  return {
+    schema: '2.0',
+    config: { update_multi: true },
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: digestTitle(variant, generatedAt) },
+    },
+    body: { elements },
+  };
 }
 
 /**

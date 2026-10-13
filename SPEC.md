@@ -367,6 +367,13 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       prioritised content. Manual `n` cards retain the regular `📋 Your Digest` heading;
       done/snooze rerenders retain whichever heading the delivered card used. Tessa approved the
       owner-only visual preview before the listener restart.
+- [x] **Transparent classification fallback** *(2026-10-13)*: if any classification item
+      falls back — missing configuration, network/HTTP rejection, malformed model output, or a
+      partial response — the whole card switches to an honest degraded view instead of presenting
+      unjudged rows as a giant LOW/FYI digest. It explains that the back office is unavailable, then
+      provides separate collapsed **DMs** and **@ MENTIONS** sections with verbatim excerpts and
+      jump links. No urgency colors, priority labels, or AI summaries appear. Done/snooze rerenders
+      preserve the fallback layout.
 
 **🔜 Next** (detail in [Roadmap](#roadmap)) — **R2 single-user bot is LIVE (2026-08-04);** the cohort
 build is now gated on an assessment. (R8's interim 7d bump shipped 2026-07-02; fuller stable-anchor design

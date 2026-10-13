@@ -1,6 +1,6 @@
 import { config, URGENCY_ORDER } from './config.js';
 import { sendMessage } from './lark.js';
-import { buildDigestCard } from './buildCard.js';
+import { buildDigestCard, buildFallbackDigestCard } from './buildCard.js';
 import { fetchSince, isAutomatedSender } from './fetchMentions.js';
 import { classify } from './classify.js';
 import { formatDate, MS_PER_HOUR } from './time.js';
@@ -35,6 +35,20 @@ export function numberItems(items) {
     return (b.createTime?.getTime?.() || 0) - (a.createTime?.getTime?.() || 0);
   });
   items.forEach((it, i) => { it.n = i + 1; });
+  return items;
+}
+
+/**
+ * Degraded-card order: DMs first, then @ mentions; newest first within each
+ * surface. No urgency field participates because fallback means it was not judged.
+ */
+export function numberFallbackItems(items) {
+  items.sort((a, b) => {
+    const surface = Number(a.isDM ? 0 : 1) - Number(b.isDM ? 0 : 1);
+    if (surface !== 0) return surface;
+    return (b.createTime?.getTime?.() || 0) - (a.createTime?.getTime?.() || 0);
+  });
+  items.forEach((item, index) => { item.n = index + 1; });
   return items;
 }
 
@@ -131,6 +145,12 @@ export async function runDigest({
     Object.assign(it, c);
   }
 
+  // A partial fallback is still a classification outage from the user's point
+  // of view. Mixing real priorities with guessed LOW rows implies confidence we
+  // do not have, so one fallback switches the entire card to the transparent,
+  // classification-free DM/@-mention layout.
+  const cardMode = items.some((item) => item.fallback) ? 'fallback' : 'prioritized';
+
   // NOTHING is filtered out of the card (2026-08-11, reverting the same-day action-only
   // experiment): every fetched item is rendered. Humans keep their full HIGH / MEDIUM /
   // LOW-FYI grouping (LOW collapsed behind the R3 panel, as before the experiment), and
@@ -140,7 +160,8 @@ export async function runDigest({
   // way: `urgency: "low"` is once again purely an ordering/grouping signal, never an
   // include/exclude gate, which is what makes a mis-classification recoverable rather
   // than invisible. See SPEC "Digest card".
-  numberItems(items);
+  if (cardMode === 'fallback') numberFallbackItems(items);
+  else numberItems(items);
 
   // Classifier bookkeeping is only needed during this run; drop it before persisting.
   // Everything else stays — state.save encrypts lastDigest at rest (R17, 2026-10-09),
@@ -148,7 +169,8 @@ export async function runDigest({
   // field the next person adds without realising it also needs to be preserved here.
   for (const it of items) { delete it.bundle; delete it.cacheKey; delete it.fallback; }
 
-  const card = buildDigestCard({
+  const buildCard = cardMode === 'fallback' ? buildFallbackDigestCard : buildDigestCard;
+  const card = buildCard({
     items,
     since: sinceDate,
     generatedAt: runAt,
@@ -164,6 +186,7 @@ export async function runDigest({
     since,
     items,
     cardVariant: resolvedCardVariant,
+    cardMode,
   };
   await store.save(self.openId, state);
   return { count: items.length, skipped };
@@ -187,7 +210,9 @@ function resolveNumbers(state, numbers) {
 async function rerender(userId, state, delivery, footerHint) {
   const hidden = store.hiddenMessageIds(state);
   let remaining = rehydrate(state.lastDigest?.items || []).filter((it) => !hidden.has(it.messageId));
-  numberItems(remaining);
+  const cardMode = state.lastDigest?.cardMode || 'prioritized';
+  if (cardMode === 'fallback') numberFallbackItems(remaining);
+  else numberItems(remaining);
   state.lastDigest = { ...state.lastDigest, items: remaining };
   // Keep the poll change-gate in sync with what done/snooze just cleared, so the
   // next scheduled tick doesn't mistake this self-caused shrink for an external
@@ -198,7 +223,8 @@ async function rerender(userId, state, delivery, footerHint) {
     await deliver(delivery, '✅ All clear — nothing left in this digest.');
     return;
   }
-  const card = buildDigestCard({
+  const buildCard = cardMode === 'fallback' ? buildFallbackDigestCard : buildDigestCard;
+  const card = buildCard({
     items: remaining,
     since: state.lastDigest.since ? new Date(state.lastDigest.since) : null,
     generatedAt: new Date(),

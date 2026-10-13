@@ -68,13 +68,11 @@ Output format (one object per item, keyed by its message_id):
 const VALID_URGENCY = new Set(['high', 'medium', 'low']);
 const VALID_CATEGORY = new Set(['incident', 'decision_needed', 'review_request', 'question', 'fyi']);
 
-// Fallback when classification is unavailable (no API key) or unusable (parse error /
-// invalid fields). `low`/`fyi` is safe again now that the card renders EVERY urgency
-// (2026-08-11): an unjudged message still appears, just in the collapsed LOW panel, so
-// nothing is dropped and a keyless run degrades quietly instead of forcing every item
-// into MEDIUM. (It was briefly `medium`/`question` during the action-only experiment,
-// when `low` meant "not rendered at all" and a keyless run would have produced an empty
-// digest — if a filter on urgency is ever reintroduced, this must change back with it.)
+// Fallback when classification is unavailable (missing config, HTTP/network error,
+// parse error, or invalid fields). The low/fyi values preserve the normal result shape,
+// but commands.js detects `fallback: true` and renders the whole run through the
+// classification-free DM/@-mention card. These values are never presented as a real
+// urgency judgement.
 function fallback(item) {
   return {
     urgency: 'low',
