@@ -1,17 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
-import { rm } from 'node:fs/promises';
+import { rm, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { relativeTime, formatDateTime, formatDate, MS_PER_HOUR } from '../src/time.js';
 import { isExcludedChatName, config } from '../src/config.js';
-import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, passesSenderFilter, isAutomatedSender, jumpLink, anchorFallback, parsePosition, threadCacheKey, SUMMARY_CACHE_VERSION } from '../src/fetchMentions.js';
-import { reactedIdsFromDetails } from '../src/lark.js';
+import { hasMeaningfulText, isUnread, groupRows, bundleKey, dmBundle, buildThreadSlice, mentionsUser, passesSenderFilter, isAutomatedSender, jumpLink, anchorFallback, parsePosition } from '../src/fetchMentions.js';
+import { reactedIdsFromDetails, assertIdentity, scopedEnv } from '../src/lark.js';
+import { registerUser, loadRegistry, lookupUser } from '../src/users.js';
 import { extractJson, systemPrompt, buildClient } from '../src/classify.js';
 import { buildDigestCard, previewText } from '../src/buildCard.js';
-import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, getCachedSummary, setCachedSummary, pruneSummaryCache, load, save } from '../src/state.js';
-import { numberItems } from '../src/commands.js';
+import { clearExpiredSnoozes, hiddenMessageIds, markDone, snooze, load, save } from '../src/state.js';
+import { numberItems, pollSignature } from '../src/commands.js';
+import { encrypt, decrypt, isEncrypted, _setKeyForTests } from '../src/crypto.js';
+import { currentSlotId } from '../src/scheduler.js';
 
 const NOW = new Date('2026-06-16T12:00:00Z');
 
@@ -265,6 +268,38 @@ test('reactedIdsFromDetails returns only messages I reacted to', () => {
   assert.equal(reactedIdsFromDetails(undefined, 'ou_me').size, 0);
 });
 
+test('assertIdentity passes through a match silently; no-ops without an expected id; throws loudly on mismatch', () => {
+  const resolved = { openId: 'ou_me', userName: 'Tessa' };
+  assert.equal(assertIdentity(resolved, 'ou_me'), resolved);      // match: same object back
+  assert.equal(assertIdentity(resolved, null), resolved);         // no expected id ⇒ no-op
+  assert.equal(assertIdentity(resolved, undefined), resolved);
+
+  assert.throws(
+    () => assertIdentity(resolved, 'ou_other', 'startup'),
+    (err) => {
+      assert.match(err.message, /IDENTITY MISMATCH/);
+      assert.match(err.message, /\(startup\)/);
+      assert.match(err.message, /ou_me/);     // resolved id present
+      assert.match(err.message, /ou_other/);  // expected id present
+      return true;
+    },
+  );
+  // context is optional — mismatch still throws (without the parenthetical) if omitted.
+  assert.throws(() => assertIdentity(resolved, 'ou_other'), /IDENTITY MISMATCH: /);
+});
+
+test('scopedEnv (R2 multi-user) overrides HOME only on the returned object, never touches process.env', () => {
+  const before = process.env.HOME;
+  const overridden = scopedEnv('/tmp/inlark-home-test');
+  assert.equal(overridden.HOME, '/tmp/inlark-home-test');
+  assert.equal(process.env.HOME, before); // ambient process state is untouched
+
+  // No home ⇒ the SAME process.env reference back (today's single-owner behavior,
+  // no override constructed at all).
+  assert.equal(scopedEnv(undefined), process.env);
+  assert.equal(scopedEnv(null), process.env);
+});
+
 test('jumpLink passes through working chat links, rebuilds broken thread links', () => {
   // Non-thread message: Lark's /client/chat/open link works — pass it through verbatim.
   const chatLink = 'https://applink.larksuite.com/client/chat/open?openChatId=oc_a&position=42';
@@ -457,6 +492,9 @@ test('markDone records ids and un-snoozes them', () => {
 });
 
 test('load/save isolate state per user — one user\'s done/digest never touches another\'s', async () => {
+  // State saves encrypt lastDigest. Keep this unit test hermetic: it must never
+  // read or create the developer's real macOS Keychain entry.
+  _setKeyForTests(Buffer.alloc(32, 5));
   const saved = process.env.STATE_DIR;
   const dir = join(tmpdir(), 'inlark-state-test');
   await rm(dir, { recursive: true, force: true }); // clean slate
@@ -476,9 +514,72 @@ test('load/save isolate state per user — one user\'s done/digest never touches
     assert.deepEqual(c.doneMessageIds, []);                  // not from someone else's state
     assert.equal(c.lastDigest, null);
   } finally {
+    _setKeyForTests(null);
     if (saved === undefined) delete process.env.STATE_DIR; else process.env.STATE_DIR = saved;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('registerUser/loadRegistry/lookupUser round-trip (R2 multi-user registry); existsSync guard rejects a bogus home', async () => {
+  const saved = process.env.USERS_REGISTRY_PATH;
+  const dir = join(tmpdir(), 'inlark-users-test');
+  await rm(dir, { recursive: true, force: true }); // clean slate
+  const home = join(dir, 'home-yixin');
+  await mkdir(home, { recursive: true }); // the home path must actually exist on disk
+  process.env.USERS_REGISTRY_PATH = join(dir, 'users.json');
+  try {
+    assert.deepEqual(await loadRegistry(), {}); // no file yet ⇒ empty, not an error
+    assert.equal(await lookupUser('ou_yixin'), null);
+
+    await registerUser('ou_yixin', home, 'Yixin Luo');
+    const entry = await lookupUser('ou_yixin');
+    assert.equal(entry.home, home);
+    assert.equal(entry.userName, 'Yixin Luo');
+    assert.ok(entry.addedAt);
+
+    // A second, unregistered sender must stay absent — registering one user
+    // never fabricates an entry for anyone else.
+    assert.equal(await lookupUser('ou_stranger'), null);
+
+    // Fail fast on a typo'd home path — never silently register a path that
+    // doesn't exist (the first line of defense against a misconfigured entry).
+    await assert.rejects(
+      () => registerUser('ou_other', join(dir, 'does-not-exist'), 'Someone'),
+      /home path does not exist/,
+    );
+  } finally {
+    if (saved === undefined) delete process.env.USERS_REGISTRY_PATH; else process.env.USERS_REGISTRY_PATH = saved;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('currentSlotId gates on weekday + window, and is stable within a slot / advances at its boundary', () => {
+  const opts = { intervalMinutes: 240, startHour: 10, endHour: 18, weekdaysOnly: true };
+  const mon = (hm) => new Date(`2026-06-15T${hm}:00`); // a Monday, local time
+
+  assert.equal(currentSlotId(mon('09:59'), opts), null); // before window
+  assert.equal(currentSlotId(mon('18:01'), opts), null); // after window
+  assert.equal(currentSlotId(mon('18:00'), opts) !== null, true); // last run fires AT endHour
+
+  // 10:00 and 13:59 fall in the same 4h slot; 14:00 is the next one.
+  assert.equal(currentSlotId(mon('10:00'), opts), currentSlotId(mon('13:59'), opts));
+  assert.notEqual(currentSlotId(mon('13:59'), opts), currentSlotId(mon('14:00'), opts));
+
+  const sat = new Date('2026-06-13T12:00'); // a Saturday
+  assert.equal(currentSlotId(sat, opts), null);
+  assert.equal(currentSlotId(sat, { ...opts, weekdaysOnly: false }) !== null, true);
+});
+
+test('pollSignature is a sorted, deduped fingerprint of the current unread set', () => {
+  assert.deepEqual(pollSignature([{ messageId: 'om_b' }, { messageId: 'om_a' }]), ['om_a', 'om_b']);
+  assert.deepEqual(pollSignature([{ messageId: 'om_a' }, { messageId: 'om_a' }]), ['om_a']); // one bundle, dup rows
+  assert.deepEqual(pollSignature([]), []);
+
+  // Same underlying set, different fetch order ⇒ identical signature — the change-gate
+  // compares this with deepEqual-style logic, so ordering must never cause a false "changed".
+  const a = pollSignature([{ messageId: 'om_x' }, { messageId: 'om_y' }]);
+  const b = pollSignature([{ messageId: 'om_y' }, { messageId: 'om_x' }]);
+  assert.deepEqual(a, b);
 });
 
 test('buildDigestCard lists ALL low items (no cap) collapsed behind the panel', () => {
@@ -658,63 +759,90 @@ test('buildDigestCard: multi-@ bundle gets a "N @you" badge + per-@ expander (to
   assert.ok(!JSON.stringify(low.elements).includes('collapsible_panel'));
 });
 
-// --- R2 token guard: per-thread summary cache --------------------------------
+// --- R17: at-rest encryption of lastDigest ------------------------------------
 
-test('threadCacheKey is stable for the same thread state and shifts when it changes', () => {
-  const base = threadCacheKey('omt_1', 12, 5);
-  assert.equal(base, threadCacheKey('omt_1', 12, 5));        // same inputs → same key (cache hit)
-  assert.notEqual(base, threadCacheKey('omt_1', 13, 5));     // new message (newest pos bumps) → miss
-  assert.notEqual(base, threadCacheKey('omt_1', 12, 6));     // I replied (watermark moves) → miss
-  assert.notEqual(base, threadCacheKey('omt_2', 12, 5));     // different thread → miss
+test('crypto round-trips an arbitrary JSON value; tampering is caught; isEncrypted gates migration', async () => {
+  // Fixed test key, in-process; no Keychain is read. See src/crypto.js's _setKeyForTests.
+  _setKeyForTests(Buffer.alloc(32, 7));
+  try {
+    const payload = {
+      generatedAt: '2026-10-09T10:00:00Z',
+      items: [{ messageId: 'om_1', text: 'please review by EOD', senderName: 'Alice' }],
+    };
+    const sealed = await encrypt(payload);
+    // Shape: a plain { enc: "<base64>" } wrapper — easy for state.load to detect
+    // via isEncrypted and swap for the decrypted value on next save.
+    assert.ok(isEncrypted(sealed));
+    assert.ok(!isEncrypted(payload));                      // raw object isn't a wrapper
+    assert.ok(!isEncrypted({ enc: 123 }));                 // non-string enc rejected
+    assert.ok(!/please review/.test(sealed.enc));          // no plaintext leaks in base64
+    assert.deepEqual(await decrypt(sealed), payload);      // round-trip exact
+
+    // GCM auth tag catches any mutation — never return a possibly-forged value.
+    const buf = Buffer.from(sealed.enc, 'base64');
+    buf[buf.length - 5] ^= 0x01;                           // flip a bit inside the tag
+    await assert.rejects(() => decrypt({ enc: buf.toString('base64') }));
+  } finally {
+    _setKeyForTests(null);
+  }
 });
 
-test('threadCacheKey returns null (uncacheable) without a thread id or newest position', () => {
-  assert.equal(threadCacheKey(null, 5, 1), null);
-  assert.equal(threadCacheKey('omt_1', null, 1), null);
-  // Assert the key's STRUCTURE against the live version constant, not a literal prefix —
-  // the version is meant to change on every classifier-prompt edit, and a hardcoded
-  // 'v2|…' turns each of those into a spurious test failure.
-  const V = `v${SUMMARY_CACHE_VERSION}`;
-  // A never-replied thread (no watermark) is still cacheable — key encodes "none".
-  assert.equal(threadCacheKey('omt_1', 5, null), `${V}|omt_1|5|none`);
-  // Position 0 is a REAL newest position (0-indexed), not "missing" — must cache.
-  assert.equal(threadCacheKey('omt_1', 0, 0), `${V}|omt_1|0|0`);
+test('state.save encrypts lastDigest at rest; state.load migrates a legacy plaintext file transparently', async () => {
+  // What's actually on disk is the privacy-critical thing — this test asserts
+  // the ciphertext in state/<open_id>.json genuinely does not contain any of
+  // the plaintext fields the pre-R17 file leaked (message text, AI summary,
+  // sender/chat names, mention excerpts).
+  _setKeyForTests(Buffer.alloc(32, 11));
+  const savedStateDir = process.env.STATE_DIR;
+  const dir = join(tmpdir(), 'inlark-r17-encryption-test');
+  await rm(dir, { recursive: true, force: true });
+  process.env.STATE_DIR = dir;
+  try {
+    const digest = {
+      generatedAt: '2026-10-09T10:00:00Z', since: '2026-10-02T10:00:00Z',
+      items: [{
+        n: 1, messageId: 'om_1', urgency: 'high', category: 'question',
+        summary: 'ReviewMySecretPRD',                                // AI-written summary (PII)
+        text: 'VerbatimMessageContent needs review',                // verbatim message (PII)
+        senderName: 'AliceNameSecret', senderType: 'user',
+        chatName: 'OpsChatSecret', isDM: false, isBroadcast: false,
+        taggedCount: 1, myTagPosition: 1, mentionCount: 0, mentions: [],
+        createTime: new Date('2026-10-09T09:00:00Z'), link: 'https://x', chatUnreadCount: 1,
+      }],
+    };
+    await save('ou_test', { ...EMPTY_STATE_SHAPE, lastDigest: digest });
+
+    // On-disk file: lastDigest is a ciphertext wrapper, and NONE of the plaintext
+    // we just wrote appears anywhere in the raw file bytes.
+    const raw = await readFile(join(dir, 'ou_test.json'), 'utf8');
+    const onDisk = JSON.parse(raw);
+    assert.ok(isEncrypted(onDisk.lastDigest), 'state.save must encrypt lastDigest at rest (R17)');
+    for (const needle of ['ReviewMySecretPRD', 'VerbatimMessageContent', 'AliceNameSecret', 'OpsChatSecret']) {
+      assert.ok(!raw.includes(needle), `plaintext "${needle}" leaked into state/*.json at rest`);
+    }
+    // The non-PII envelope stays readable so you can eyeball runs without decrypting.
+    assert.equal(onDisk.lastDigest.generatedAt, undefined); // sealed inside, not in envelope
+    // Round-trip through load returns the original decrypted shape.
+    const loaded = await load('ou_test');
+    assert.equal(loaded.lastDigest.items[0].text, 'VerbatimMessageContent needs review');
+
+    // Migration: a legacy plaintext file (pre-R17) loads successfully and
+    // re-encrypts on the next save — zero-touch for the owner.
+    const legacy = { lastDigest: { items: [{ messageId: 'om_legacy', text: 'LegacyPlaintext' }] } };
+    await writeFile(join(dir, 'ou_legacy.json'), JSON.stringify(legacy), 'utf8');
+    const migrated = await load('ou_legacy');
+    assert.equal(migrated.lastDigest.items[0].text, 'LegacyPlaintext'); // read through
+    await save('ou_legacy', migrated);
+    const after = JSON.parse(await readFile(join(dir, 'ou_legacy.json'), 'utf8'));
+    assert.ok(isEncrypted(after.lastDigest), 'legacy file should re-encrypt on next save');
+  } finally {
+    _setKeyForTests(null);
+    if (savedStateDir === undefined) delete process.env.STATE_DIR; else process.env.STATE_DIR = savedStateDir;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
-test('SUMMARY_CACHE_VERSION is baked into the key, so a prompt change orphans old verdicts', () => {
-  // The guard that stops a cached pre-change classification being served under a new
-  // prompt: every key carries the version, so bumping it misses every stale entry.
-  assert.ok(threadCacheKey('omt_1', 5, 1).startsWith(`v${SUMMARY_CACHE_VERSION}|`));
-  assert.equal(typeof SUMMARY_CACHE_VERSION, 'number');
-});
-
-test('summary cache stores and reuses a classification, refreshing recency on hit', () => {
-  const state = { threadSummaryCache: {} };
-  const cls = { urgency: 'high', category: 'incident', summary: 'rollback the deploy now' };
-  const t0 = new Date('2026-06-20T00:00:00Z');
-  setCachedSummary(state, 'k1', cls, t0);
-
-  const hit = getCachedSummary(state, 'k1', NOW);
-  assert.deepEqual(hit, cls);                                   // exact classification reused (0 tokens)
-  assert.equal(state.threadSummaryCache.k1.savedAt, NOW.toISOString()); // recency refreshed on hit
-  assert.equal(getCachedSummary(state, 'missing'), null);       // miss → null → caller classifies
-  assert.equal(getCachedSummary(state, null), null);            // uncacheable row → null
-});
-
-test('pruneSummaryCache drops orphaned (stale) entries but keeps fresh ones', () => {
-  const state = {
-    threadSummaryCache: {
-      fresh: { urgency: 'low', category: 'fyi', summary: 'x', savedAt: new Date(NOW - 2 * MS_PER_HOUR).toISOString() },
-      stale: { urgency: 'low', category: 'fyi', summary: 'y', savedAt: new Date(NOW - 100 * MS_PER_HOUR).toISOString() },
-    },
-  };
-  pruneSummaryCache(state, 24, NOW); // 24h TTL
-  assert.ok(state.threadSummaryCache.fresh);   // 2h old → kept
-  assert.ok(!state.threadSummaryCache.stale);  // 100h old → orphan aged out
-});
-
-test('pruneSummaryCache with ttl<=0 clears the whole cache (kill switch)', () => {
-  const state = { threadSummaryCache: { a: { savedAt: NOW.toISOString() } } };
-  pruneSummaryCache(state, 0, NOW);
-  assert.deepEqual(state.threadSummaryCache, {});
-});
+const EMPTY_STATE_SHAPE = {
+  lastRunAt: null, doneMessageIds: [], snoozedMessages: [],
+  lastPollSignature: null, lastPollAt: null, lastDigest: null,
+};

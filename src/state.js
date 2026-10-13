@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { MS_PER_HOUR } from './time.js';
+import { encrypt, decrypt, isEncrypted } from './crypto.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_STATE_DIR = join(__dirname, '..', 'state');
@@ -38,12 +39,10 @@ const EMPTY_STATE = {
   lastPollAt: null,
   // Snapshot of the most recently delivered digest, so `done`/`snooze` can map
   // the numbers shown on the card to message_ids and re-render WITHOUT another
-  // fetch/classify round-trip.
-  lastDigest: null, // { generatedAt, since, items: [ normalized+classified item ] }
-  // R2 token guard — per-thread summary cache (see SPEC R2 pre-launch gate).
-  // { [cacheKey]: { urgency, category, summary, savedAt } }, keyed by
-  // thread_id + newest thread position + my watermark (fetchMentions.threadCacheKey).
-  threadSummaryCache: {},
+  // fetch/classify round-trip. Fields are kept to the minimum the renderer +
+  // done/snooze actually read (R17 data-minimization, 2026-10-08 — see
+  // commands.runDigest's KEEP set).
+  lastDigest: null, // { generatedAt, since, items: [ lean item ] }
 };
 
 export async function load(openId) {
@@ -58,17 +57,34 @@ export async function load(openId) {
     try { await rename(LEGACY_STATE_PATH, p); } catch { /* raced by a concurrent load — fall through */ }
   }
   if (!existsSync(p)) return { ...EMPTY_STATE };
+  let parsed;
   try {
-    const raw = await readFile(p, 'utf8');
-    return { ...EMPTY_STATE, ...JSON.parse(raw) };
+    parsed = JSON.parse(await readFile(p, 'utf8'));
   } catch (err) {
     throw new Error(`state for ${openId} is corrupt (${err.message}). Fix or delete ${p}.`);
   }
+  // R17 at-rest encryption (2026-10-09): lastDigest holds message text + AI summaries,
+  // so it's stored as a GCM-sealed blob under { enc }. Older files have plaintext
+  // lastDigest (pre-R17) — pass that through unchanged; it'll be re-encrypted on the
+  // next save, migrating the file in place with no action from the owner.
+  if (isEncrypted(parsed.lastDigest)) {
+    parsed.lastDigest = await decrypt(parsed.lastDigest);
+  }
+  // Historical cleanup: pre-2026-10-08 files have a plaintext `threadSummaryCache`
+  // field holding AI-written thread summaries. The cache was removed; drop any
+  // leftover on load so the next save purges it from disk.
+  delete parsed.threadSummaryCache;
+  return { ...EMPTY_STATE, ...parsed };
 }
 
 export async function save(openId, state) {
   await mkdir(stateDir(), { recursive: true });
-  await writeFile(userStatePath(openId), JSON.stringify(state, null, 2) + '\n', 'utf8');
+  // Encrypt only lastDigest — the rest (doneMessageIds, snoozedMessages, timestamps,
+  // poll signature) is opaque IDs with no PII, kept readable so you can eyeball
+  // whether a run happened without decrypting. See src/crypto.js + SPEC.md R17.
+  const onDisk = { ...state };
+  if (onDisk.lastDigest != null) onDisk.lastDigest = await encrypt(onDisk.lastDigest);
+  await writeFile(userStatePath(openId), JSON.stringify(onDisk, null, 2) + '\n', 'utf8');
 }
 
 /** Drop snoozes whose timer has elapsed. Mutates + returns state. */
@@ -103,44 +119,5 @@ export function snooze(state, messageIds, hours, now = new Date()) {
   const byId = new Map((state.snoozedMessages || []).map((s) => [s.messageId, s]));
   for (const id of messageIds) byId.set(id, { messageId: id, snoozeUntil });
   state.snoozedMessages = [...byId.values()];
-  return state;
-}
-
-/**
- * R2 token guard — per-thread summary cache (see SPEC R2 pre-launch gate).
- * Stores a thread row's classification keyed by thread_id + newest thread position
- * + my watermark (fetchMentions.threadCacheKey). An unchanged thread on a later run
- * reuses the stored answer with ZERO Anthropic tokens — the dominant cost lever once
- * many colleagues use this and every stateless run re-summarises the whole backlog.
- */
-
-/** Cached classification for `key`, or null. Refreshes recency on hit so live threads stay warm. */
-export function getCachedSummary(state, key, now = new Date()) {
-  const hit = key && state.threadSummaryCache?.[key];
-  if (!hit) return null;
-  hit.savedAt = now.toISOString();
-  return { urgency: hit.urgency, category: hit.category, summary: hit.summary };
-}
-
-/** Store a classification under its cache key. */
-export function setCachedSummary(state, key, { urgency, category, summary }, now = new Date()) {
-  if (!key) return state;
-  (state.threadSummaryCache ||= {})[key] = { urgency, category, summary, savedAt: now.toISOString() };
-  return state;
-}
-
-/**
- * Drop cache entries older than `ttlHours` — orphaned keys (a thread advanced, so
- * its old key never matches again) age out, keeping the cache bounded. `ttlHours <= 0`
- * clears the whole cache (the THREAD_CACHE_TTL_HOURS=0 kill switch).
- */
-export function pruneSummaryCache(state, ttlHours, now = new Date()) {
-  const cache = state.threadSummaryCache || {};
-  if (!(ttlHours > 0)) { state.threadSummaryCache = {}; return state; }
-  const cutoff = now.getTime() - ttlHours * MS_PER_HOUR;
-  for (const [k, v] of Object.entries(cache)) {
-    if (!v?.savedAt || new Date(v.savedAt).getTime() < cutoff) delete cache[k];
-  }
-  state.threadSummaryCache = cache;
   return state;
 }

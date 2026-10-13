@@ -99,26 +99,17 @@ export async function runDigest({ self, delivery, footerHint, ack = false, requi
     return { count: 0, skipped };
   }
 
-  // R2 token guard: reuse cached per-thread summaries so an UNCHANGED thread costs
-  // ZERO Anthropic tokens (the dominant cost lever at multi-user scale — see SPEC R2
-  // pre-launch gate). Only thread-bundle rows carry a `cacheKey`; the token-free Lark
-  // thread fetch already ran (it's how we know the thread is unchanged). ttl<=0 is a
-  // kill switch: prune clears the cache and we classify everything.
-  const cacheOn = config.threadCacheTtlHours > 0;
-  store.pruneSummaryCache(state, config.threadCacheTtlHours);
-  const toClassify = [];
-  let cachedCount = 0;
+  // R17 (2026-10-08): the per-thread summary cache was removed. It stored AI-paraphrased
+  // thread contents on disk indefinitely (`threadSummaryCache: { urgency, category, summary }`),
+  // which was the heaviest data-at-rest surface in the state file. Every run now classifies
+  // every unchanged thread again — paid in Anthropic tokens, not in persisted PII. If cost
+  // becomes a real pressure, the right next move is encryption-at-rest, not re-adding the
+  // cache. Any pre-existing `state.threadSummaryCache` is dropped on next save.
+  delete state.threadSummaryCache;
+  const classified = await classify(items, { userName: self.userName });
   for (const it of items) {
-    const hit = cacheOn && it.cacheKey ? store.getCachedSummary(state, it.cacheKey) : null;
-    if (hit) { Object.assign(it, hit); cachedCount++; }
-    else toClassify.push(it);
-  }
-
-  const classified = await classify(toClassify, { userName: self.userName });
-  for (const it of toClassify) {
     const c = classified.get(it.messageId);
     Object.assign(it, c);
-    if (cacheOn && it.cacheKey) store.setCachedSummary(state, it.cacheKey, c); // reuse next run
   }
 
   // NOTHING is filtered out of the card (2026-08-11, reverting the same-day action-only
@@ -132,9 +123,11 @@ export async function runDigest({ self, delivery, footerHint, ack = false, requi
   // than invisible. See SPEC "Digest card".
   numberItems(items);
 
-  // The bundle + cache bookkeeping were only needed for classification; drop them so
-  // the snapshot done/snooze re-renders from stays lean (it keeps bundleType/threadTopic).
-  for (const it of items) { delete it.bundle; delete it.cacheKey; }
+  // Classifier bookkeeping is only needed during this run; drop it before persisting.
+  // Everything else stays — state.save encrypts lastDigest at rest (R17, 2026-10-09),
+  // so field-level stripping would add no privacy and would risk breaking a renderer
+  // field the next person adds without realising it also needs to be preserved here.
+  for (const it of items) { delete it.bundle; delete it.cacheKey; delete it.fallback; }
 
   const card = buildDigestCard({ items, since: sinceDate, generatedAt: runAt, footerHint });
   await deliver(delivery, card, 'interactive');
@@ -142,7 +135,7 @@ export async function runDigest({ self, delivery, footerHint, ack = false, requi
   state.lastRunAt = runAt.toISOString();
   state.lastDigest = { generatedAt: runAt.toISOString(), since, items };
   await store.save(self.openId, state);
-  return { count: items.length, cached: cachedCount, skipped };
+  return { count: items.length, skipped };
 }
 
 /** Resolve card numbers → items from the last delivered digest. */
