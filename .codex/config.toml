@@ -1,9 +1,9 @@
 default_permissions = "inlark-safe"
 
 [permissions.inlark-safe]
-description = "Workspace editing with project secrets kept unreadable."
+description = "Workspace editing with inlark secrets inaccessible."
 extends = ":workspace"
 
-[permissions.inlark-safe.filesystem.":workspace_roots"]
-".env" = "deny"
-"homes" = "deny"
+[permissions.inlark-safe.filesystem]
+"/Users/tessa.zhang/inlark/.env" = "deny"
+"/Users/tessa.zhang/inlark/homes" = "deny"

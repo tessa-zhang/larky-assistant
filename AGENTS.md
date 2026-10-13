@@ -31,3 +31,10 @@ digest card I act on
 (jump / done / snooze). Current target direction: a **frictionless hosted bot** so
 teammates can use it without an IDE (Roadmap **R2**). Everything else — the unread
 proxy, reactions, @all handling, API constraints — is in SPEC.md.
+
+## Protected credentials
+
+Never read, write, modify, attach, or print `.env` or anything under `homes/`.
+Do not request elevated access to bypass these restrictions.
+Use `.env.example` for configuration development.
+Do not run commands that load real credentials; the owner runs live tests.
