@@ -52,15 +52,22 @@ npm run listen      # long-running WebSocket listener
 # then DM the bot in Lark: "n"
 ```
 
+`listen` also **auto-polls** in the background (default every 4h, weekdays,
+10:00–18:00 local) and sends a fresh card **only when your unread set has
+changed** since the last check — so you don't have to type `n` to stay
+current. Tune or disable via `POLL_*` in `.env.example`.
+
 ## Setup
 
 ```bash
 npm install
-cp .env.example .env   # then set ANTHROPIC_API_KEY
+cp .env.example .env   # then set ANTHROPIC_API_KEY (your LiteLLM virtual key) + ANTHROPIC_BASE_URL
 ```
 
 Lark auth is already handled by `lark-cli` (run `lark-cli auth status` to
-confirm your user identity is `ready`). No Lark secrets live in `.env`.
+confirm your user identity is `ready`). No Lark secrets live in `.env`. inlark
+always calls `lark-cli` with `--profile larky` (hardcoded — see SPEC), so it's
+unaffected by whichever profile is globally active on the machine.
 
 ## Enabling the bot (one-time console steps)
 
@@ -91,9 +98,71 @@ When that succeeds, set `SEND_AS=bot` and run `npm run listen`.
 | Command | Action |
 |---|---|
 | `npm run inlark` | Fetch currently-unread mentions+DMs (last 7 days), classify, deliver card |
+| `npm run inlark -- --user <open_id>` | Testing hook: run the digest for a registered non-owner user instead of yourself (see Multi-user below) |
 | `npm run done -- <n…>` | Mark card items done (never reappear) |
 | `npm run snooze -- <n…>` | Hide items for `SNOOZE_HOURS` (default 24h) |
-| `npm run listen` | Bot mode: react to `n` / `done` / `snooze` DMs |
+| `npm run listen` | Bot mode: react to `n` / `done` / `snooze` DMs + auto-poll on a schedule |
+| `npm run adduser -- <open_id> <home-path> [userName]` | Register a teammate (see Multi-user below) |
+| `npm run listusers` | List registered non-owner users |
+| `npm run reset-key -- --yes` | Rotate the state-encryption key in Keychain (recovery, see Privacy below) |
+
+## Privacy / data at rest (R17)
+
+Each user's digest is persisted to `state/<open_id>.json` so `done`/`snooze` can re-render
+without re-fetching from Lark. The chunk that holds message content + AI summaries
+(`lastDigest`) is **encrypted at rest** (AES-256-GCM), under a 32-byte key stored in the
+macOS **Keychain** entry `inlark/state-key`. The rest of the file — `doneMessageIds`,
+`snoozedMessages`, timestamps, poll signature — is opaque IDs and timestamps with no
+PII, kept readable so you can inspect whether a run happened without decrypting.
+
+The key is created automatically on first run (zero-touch). If Keychain reports a
+malformed or unreadable key, inlark **refuses to start** and prints the recovery command.
+Running `npm run reset-key -- --yes` mints a fresh key; every existing user's pending
+digest becomes unreadable gibberish, and the next `npm run inlark` rebuilds from Lark —
+no core state (done/snooze records, timestamps) is lost.
+
+**Threat model it closes:** someone with raw read access to the repo folder (backup leak,
+lost laptop with disk encryption off, iCloud sync accident) sees ciphertext they can't
+decrypt. **Does not close:** code running as you on your unlocked laptop (Keychain hands
+it the key), or memory inspection during a running digest.
+
+## Multi-user (R2)
+
+A second (or Nth) person can use your running bot without their own Lark app —
+they share your app (`cli_aacf7cc512b8ded2`), each holding their own **user
+token** under their own isolated `HOME` directory, so `lark-cli` never mixes
+up whose token is whose. Onboarding is a manual, owner-run CLI/device-code
+flow (no in-Lark "Authorize" card yet — see SPEC.md's R2 tracker):
+
+```bash
+mkdir -p homes/<name>
+
+# You personally type the app secret here — never via a flag/history entry:
+HOME="$(pwd)/homes/<name>" lark-cli profile add --name larky \
+  --app-id cli_aacf7cc512b8ded2 --brand lark --app-secret-stdin
+
+# Generate their device code, locked to the same 11-scope set as the owner:
+HOME="$(pwd)/homes/<name>" lark-cli auth login --profile larky --no-wait --json \
+  --scope "auth:user.id:read contact:user.base:readonly contact:user.basic_profile:readonly contact:user.department:readonly im:chat:readonly im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.reactions:read im:message:readonly search:message offline_access"
+
+# Send them the verification URL/code; they approve in their own browser, then:
+HOME="$(pwd)/homes/<name>" lark-cli auth login --profile larky --device-code "<code>" --json
+
+# Verify, then register:
+HOME="$(pwd)/homes/<name>" lark-cli auth status --profile larky
+npm run adduser -- <their_open_id> ./homes/<name> "Their Name"
+npm run listusers
+```
+
+They can now DM the running bot `n` directly — `listen`'s dispatch gate
+re-resolves and re-asserts their identity under their own isolated `HOME` on
+**every single message** (never cached, never just at startup), so a
+misconfigured or stale registry entry fails loudly instead of ever running
+one person's digest under another's token. `homes/` and `users.json` are
+both gitignored (same tier as `.env`/`state/` — they hold credentials/PII) —
+the project Codex policy also denies tool access to `homes/**` directly. The
+registry is loaded fresh for every inbound message, so a newly registered user
+can use the already-running listener without a restart.
 
 ## How it works
 
@@ -104,7 +173,7 @@ src/
 ├── state.js        # state.json: lastRun, done, snooze, last-digest snapshot
 ├── lark.js         # lark-cli exec wrapper
 ├── fetchMentions.js# messages-search: unread @mentions (group) + DMs (p2p), one row per chat
-├── classify.js     # chunked Claude calls (40/call, concurrent) → urgency/category/summary
+├── classify.js     # chunked LiteLLM calls (20/call, concurrent) → urgency/category/summary
 ├── buildCard.js    # Lark interactive card JSON
 └── commands.js     # digest / done / snooze orchestration
 ```
@@ -154,10 +223,9 @@ src/
 - **Group chat names + name-based channel exclusion** require bot capability +
   `im:chat:readonly`; until then group items show `[group]` and the
   `--exclude-sender-type bot` filter carries the noise reduction.
-- **Privacy**: message text is sent to the Anthropic API for classification.
-  Confirm this is acceptable for internal content before wider use.
-  `ANTHROPIC_BASE_URL` can redirect that to an Anthropic-compatible gateway —
-  leave it unset unless IT/Security has approved the target for company data.
-  A non-default endpoint is logged on every run.
+- **Privacy**: message text is sent to Traveloka's IT-listed **LiteLLM proxy**
+  (`ANTHROPIC_BASE_URL`, OpenAI-compatible `/v1/chat/completions`) for classification,
+  not directly to api.anthropic.com. Confirm the deployed proxy is still the
+  IT/Security-approved target before wider use.
 - `MAX_MESSAGES` caps a single run as a rate-limit guard; the CLI reports when
   items were capped.

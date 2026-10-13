@@ -249,31 +249,137 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       `SUMMARY_CACHE_VERSION` → **3** (v2 verdicts predate the signal). Scales with **no per-user
       config, no absolute thresholds, no extra API calls, nothing persisted** — see **Directedness**.
       Unit-tested (`strongestTag` via `groupRows`, prompt framing, badge incl. DM/@all suppression).
-- [x] **Configurable inference endpoint** *(2026-09-01)*: optional `ANTHROPIC_BASE_URL` sends
+- [x] **Configurable inference endpoint** *(2026-09-01)*: `ANTHROPIC_BASE_URL` sends
       classification through an Anthropic-compatible **gateway** instead of `api.anthropic.com`.
       Motivated by the sanctioned path — LiteLLM is on Traveloka's IT-listed AI set and works
       *only* via a base-URL override — and it removes the need to patch `classify.js` to change
-      providers. Unset = the previous direct-to-Anthropic path, so the default data flow is
-      unchanged. Because this is the single place inlark's content leaves the machine, a
-      non-default value **logs the endpoint to stderr on every run** (`buildClient`) rather than
-      redirecting message text silently. **Not a licence to point it anywhere:** the target must
-      be a gateway IT/Security has approved for company data, and pointing it at an unlisted
-      host contradicts the privacy note below and the R16 custodial guarantee — so that note
-      must be updated in the same change. *(A Cursor pilot was raised 2026-09-01 as the driver;
-      no Cursor-specific config was added — an org-level AI-tools listing, not a chat approval,
-      is what would make such a target legitimate.)*
+      providers. *(A Cursor pilot was raised 2026-09-01 as the driver; no Cursor-specific config
+      was added — an org-level AI-tools listing, not a chat approval, is what would make such a
+      target legitimate.)*
+- [x] **LiteLLM as the required classification path** *(2026-09-08)*: superseded the "unset =
+      direct-to-Anthropic" default above — `ANTHROPIC_BASE_URL` is now **required** alongside
+      `ANTHROPIC_API_KEY` (`classify()` falls back to heuristic `low`/`fyi` if either is missing);
+      there is no more silent direct-to-`api.anthropic.com` path. `ANTHROPIC_API_KEY` now holds a
+      **LiteLLM virtual key**, not a raw Anthropic key. `buildClient()` sends it via
+      `authToken` (`Authorization: Bearer`), not `apiKey` (`X-Api-Key`) — the latter got a 401
+      `"API key is invalid"` with `request_id: null` from LiteLLM's passthrough, which reads as
+      LiteLLM's own auth layer rejecting the header shape rather than a bad key. **Confirmed live**
+      against `litellm.tvlk.cloud` (2026-09-24) — auth/reachability were never the problem; see the
+      two follow-on bullets below for what actually was. Because this is the single place inlark's
+      content leaves the machine, this is still the setting IT/Security approval hinges on — the
+      R16 custodial guarantee (below) assumes the configured target is the IT-listed gateway, not
+      an unlisted host.
+- [x] **`CLAUDE_MODEL` must be on the LiteLLM key's own allow-list** *(2026-09-11)*: the "no
+      prioritization, no summarization" symptom (digest arrives but every item is generic fallback
+      text) traced to a clean `403 key_model_access_denied` from LiteLLM, not a network/auth
+      failure — the virtual key's allow-list uses LiteLLM's own naming, which doesn't match
+      Anthropic's raw model id (`claude-sonnet-4-6` 403s; the key wants `claude-sonnet-4-6@default`,
+      `claude-sonnet-4.6`, or `claude-sonnet-5`). Fixed the code default to `claude-sonnet-5`; also
+      upgraded `classify.js`'s per-chunk failure log (`describeError()`) to separate network/DNS
+      errors from HTTP-status errors from parse errors, instead of one indistinguishable `.message`
+      string for every failure mode. **Note:** `.env`'s `CLAUDE_MODEL` is a literal override and
+      wins over the code default — if this resurfaces, check `.env`'s actual value first.
+- [x] **Never cache a `classify()` fallback result** *(2026-09-24)*: found while re-diagnosing the
+      above after the model fix landed but classification *still* didn't happen. `commands.js`'s
+      per-thread summary cache (R2 token guard) cached whatever `classify()` returned, including
+      degraded `fallback()` output (shape-identical to a real judgement) — so the ~2 weeks the model
+      was broken poisoned the cache with `low`/`fyi` placeholders that then out-lived the fix:
+      `getCachedSummary` refreshes an entry's recency on every hit, so a poisoned entry never ages
+      out via TTL as long as it keeps getting served. `classify()` now tags its output
+      `fallback: true|false`; `commands.js` only writes to the cache when `false`. Existing
+      poisoned entries had to be purged by hand (one-off, not a recurring fix). **Historical now:**
+      R17 removed the persistent summary cache entirely on 2026-10-08.
+- [x] **Provider-agnostic LiteLLM classification + truncation recovery** *(2026-10-12)*:
+      classification now calls LiteLLM's OpenAI-compatible `/v1/chat/completions` route with native
+      `fetch`, replacing the Anthropic SDK/passthrough and allowing any model on the virtual key's
+      allow-list. Real 40-item responses were truncating mid-array, so chunks are now 20 items with
+      a 16,384-token ceiling; `extractJson` also repairs trailing commas and salvages every complete
+      object from a truncated response before falling back row-by-row. `npm run probe-models` lists
+      the key's live allow-list. Regression-tested with fenced, malformed, and truncated output.
+- [x] **`lark-cli` calls pinned to the `larky` profile** *(2026-09-10)*: `lark-cli`'s active-profile
+      pointer (`~/.lark-cli/config.json` → `currentApp`) is shared machine-wide, and it got silently
+      flipped away from `larky` (`cli_aacf7cc512b8ded2`, inlark's locked app) to `main`
+      (`cli_aaaba7cf9a211ed1`, a far broader legacy app — `base:*`/`docx:*`/`drive:*`/`wiki:*`/`mail:*`
+      and more) by something outside this project. inlark's own code never touched it, but every
+      call just followed whatever was globally active, so it silently inherited the wrong identity
+      and scope grant. Fix: every `lark-cli` invocation now carries `--profile larky`
+      (`LARK_CLI_PROFILE` in `config.js` → `src/lark.js`'s `runRaw` + `cmdListen`'s event-consume
+      spawn in `src/index.js`) — targets the profile directly, immune to `currentApp` drift.
+- [x] **Identity-owner-assertion guard** *(2026-09-29)*: hardening pass ahead of the R2 cohort build,
+      prompted by Tessa's bar — *"I never want to accidentally have larky pull a token of another
+      user and pull a digest on my feed."* `main()` previously **silently overwrote** `self.openId`
+      from `LARK_USER_OPEN_ID` with no check that anything resolved correctly; it now calls
+      `assertIdentity(self, config.userOpenId || OWNER_OPEN_ID, 'startup')` (new export, `src/lark.js`),
+      which hard-throws on any mismatch instead of degrading — deliberately the opposite of this file's
+      fail-open helpers (`getChatName`, `getReactedMessageIds`), since running under the wrong identity's
+      token is exactly the harm being prevented. `OWNER_OPEN_ID` (`src/config.js`) is the known-good
+      open_id for the owner identity on `larky`, hardcoded and **not env-configurable** (same rationale
+      as `LARK_CLI_PROFILE`: an env var here would reopen the exact footgun this closes). On a mismatch,
+      `listen`'s unattended process (R12) also attempts a best-effort owner-alert DM before the error
+      propagates, so a stopped/misrouted listener surfaces promptly instead of silently going dark. One
+      call site (`main()`) is complete coverage today — `assertIdentity` is a reusable primitive built
+      for the multi-tenant dispatch call site R2's cohort build will add (see R16 below).
+      **Also recorded:** the env-scoping principle for that future per-user `HOME` threading — a per-call
+      `HOME` override must be a scoped `env` option on that one `execFile`/`spawn` call, never a
+      `process.env.HOME` mutation, since `cmdListen` dispatches concurrent async events and mutating
+      shared process state across an `await` boundary would let one user's dispatch clobber another's
+      HOME mid-flight (comments at `runRaw` in `src/lark.js` and the event-consume spawn in
+      `src/index.js`). **Complementary dev-time guardrail (not app code):** a global Claude Code
+      `PreToolUse` hook (`~/.claude/hooks/lark-cli-profile-guard.sh`) + `permissions.deny` rules in
+      `~/.claude/settings.json` restrict any `lark-cli` Bash call Claude Code itself runs to
+      `--profile larky` or `--profile main` only, denying bare/profile-less calls and shell-indirection
+      bypasses (`bash -c`, `sh -c`, `zsh -c`, `eval`). Scoped to Claude Code's own tool layer during
+      dev/debug sessions — it does **not** govern the deployed `node src/index.js listen` process (no
+      Claude Code involved there; that's what the assertion guard above is for), and does **not** cover
+      `~/.local/lib/lark-cli-mcp`'s separate `lark_run` MCP tool, which shells out directly and is
+      invisible to a hook matched on the `Bash` tool — a known, accepted gap, documented rather than
+      fixed (low actual exposure: that MCP server isn't part of inlark's own toolchain).
+- [x] **R12 (partial) — auto-poll inside `npm run listen`** *(2026-09-30)*: `listen` no longer
+      requires typing `n` to refresh. A 60s-checked, wall-clock-aligned timer (`currentSlotId`,
+      `src/scheduler.js`) fires **every `POLL_INTERVAL_MINUTES` (default 240 = 4h), weekdays only,
+      10:00–18:00 local (last run at 18:00)**, and only **sends** when the unread @mention/DM set
+      actually changed since the last check (`pollSignature`/`state.lastPollSignature` in
+      `src/commands.js`) — a change-gate added specifically because a 30-min-cadence draft of this
+      (change-gated or not) would still have posted frequent near-duplicate full cards into the DM
+      thread, burying the most current digest; 4h is a deliberately conservative starting cadence,
+      tunable back down once lived with. `done`/`snooze` sync the gate's signature too, so clearing
+      items never looks like an "external change" to the next tick. Reuses the existing
+      `runDigest`/`digestRunning` in-flight guard — a scheduled tick and a manual `n` can never
+      overlap and trip `99991400`. Delivery follows whatever `SEND_AS` is already configured (bot by
+      default), not the self-chat R12 originally assumed. **Still open from R12's original scope:**
+      no `launchd`/boot-persistence — `listen` still has to be kept running manually (nohup today);
+      see the Roadmap entry.
 
 **🔜 Next** (detail in [Roadmap](#roadmap)) — **R2 single-user bot is LIVE (2026-08-04);** the cohort
 build is now gated on an assessment. (R8's interim 7d bump shipped 2026-07-02; fuller stable-anchor design
 parked, not blocking.)
-- [ ] **R16 — Multi-user ROI vs privacy/security ASSESS** (⭐ HIGHEST PRIORITY, added 2026-08-05): go/no-go
+- [x] **R16 — Multi-user ROI vs privacy/security ASSESS** *(go decision 2026-10-05)*: go/no-go
       gate before *any* R2 cohort build. lark-cli can't do multi-user, so it needs a **custodial per-user
       token store** — weigh the ROI against the privacy/security burden of holding N users' refresh tokens +
-      message data. Output = a decision + architecture, **not code**. Nothing on the cohort proceeds until this lands.
-- [ ] **R17 — No user-identifiable data at rest** (privacy, added 2026-08-05): persist nothing back-traceable
-      to a user. Message/chat ids are opaque + content is auth-gated (lower risk); the real exposure is the
-      plaintext **sender names + AI summaries + open_ids** in `state/<open_id>.json`. Tension with the
-      done/snooze summary cache. Composes with R16.
+      message data. **Decision: GO**, made live with Yixin Luo as the test second user — chosen architecture
+      is **per-user isolated `HOME` directories** (not a from-scratch token store/DB): each additional user's
+      `lark-cli` token lives in their own `~/.lark-cli/config.json` under a dedicated HOME, never touched by
+      the owner's. inlark itself stores no token at all — only an `open_id → home path` pointer in `users.json`.
+      Privacy guarantee this chooses: **no-content-at-rest beyond what single-user already persists** (the
+      registry holds a path, not a token or message data) **+ no-cross-uid** (hard `assertIdentity` re-check
+      on every dispatch, not just at startup) — **not operator-blind** (the operator's machine still runs the
+      reads). **R17 is explicitly NOT closed by this** — see below, still open and now higher-stakes at N users.
+- [x] **R17 — No user-identifiable data at rest** (privacy, added 2026-08-05; **closed 2026-10-09**) —
+      **Decision 2026-10-09:** encryption-at-rest, not field-stripping (an earlier same-week pass
+      stripped ids/positions, which touched the right surface but didn't move the needle — the real
+      PII is `text` / `summary` / sender/chat names, all load-bearing for `done`/`snooze` re-render).
+      `state.lastDigest` is now sealed with **AES-256-GCM** under one 32-byte key stored in the
+      **macOS Keychain** (`inlark/state-key`) — see [src/crypto.js](src/crypto.js) +
+      [src/state.js](src/state.js). The rest of the state file (`doneMessageIds`, `snoozedMessages`,
+      timestamps, poll signature — all opaque ids/timestamps, no PII) stays readable so you can
+      eyeball whether a run happened without decrypting. Pre-R17 files migrate transparently on
+      next save; the `threadSummaryCache` surface was separately removed on 2026-10-08 (demand-vs-
+      cost call — see R16 ROI deliberation). Recovery: `npm run reset-key -- --yes` on a corrupted
+      Keychain entry drops every pending digest (next `npm run inlark` rebuilds). **Threat model
+      honestly scoped:** closes "attacker gets repo read access" (ciphertext without the Keychain
+      key is unreadable); does NOT close code execution as you on your unlocked laptop (Keychain
+      would hand that process the key — same session boundary everything else runs under) or
+      memory inspection during a running digest. Hardware-token / HSM is out of scope.
 - [ ] **R2 — Hosted bot** (committed; the launch step after R3): frictionless, installable +
       runnable *without an IDE*, ideally entirely inside Lark. **Pre-launch token-guard gate:
       ✅ shipped + live-verified 2026-06-26** (per-thread summary cache, above). **Decisions
@@ -313,15 +419,29 @@ parked, not blocking.)
       `im:message.p2p_msg:readonly`, persistent connection). Verified end-to-end: `SEND_AS=bot` digest
       delivered a live card (49 items; watermark skipped 361 read + 10 reacted), and inbound DM `hello`
       received over the bot. `SEND_AS` default flipped `user`→`bot`. Cost 4 approval rounds + a
-      `base`-vs-`basic_profile` naming trap (see Least-privilege section). **Still remaining for R2:**
-      (0) custom per-user token store + code flow (lark-cli can't do multi-user — confirmed 2026-08-05,
-      auth-mechanism note above), (1) bot-driven onboarding, (3) multi-tenant token-routing listener,
-      (4) always-on host — the cohort build.
+      `base`-vs-`basic_profile` naming trap (see Least-privilege section).
+      **(0) and (3) shipped 2026-10-05** (R16 went GO same day, live with Yixin Luo as the test second
+      user) — see the R16 tracker entry above for the chosen architecture (per-user isolated `HOME`
+      dirs, not a custom token DB). `src/lark.js`'s `runRaw` now takes an optional `home` and threads it
+      through every READ call (`getSelf`, `searchMessages`, `listThreadMessages`, `getReactedMessageIds`,
+      `getChatName`) via a scoped `execFile` `env` override — never a `process.env.HOME` mutation (the
+      principle already noted here pre-build). `sendMessage` deliberately untouched — bot delivery is
+      tenant-level/shared, no per-user HOME needed. New `src/users.js` registry (`users.json`, gitignored):
+      `open_id → { home, userName, addedAt }`, written only via `adduser` (which itself calls `getSelf(home)`
+      + `assertIdentity` before registering — a misconfigured pair can't enter the registry). `cmdListen`'s
+      dispatch gate now accepts a registered non-owner sender, but **re-resolves + re-asserts identity fresh
+      on every single dispatch** (not cached, not just at startup) before running their digest — the
+      standing red line (never let `larky` pull one user's token for another's digest) is enforced at the
+      point of use, every time, not just once at process start. `done`/`snooze` needed no change (no Lark
+      reads, already keyed per-`userId`). **Still remaining for R2:** (1) bot-driven onboarding
+      (`p2p_chat_create` → Authorize card → per-user device-flow) — onboarding is still a manual CLI/
+      device-code walkthrough run by the owner; (4) always-on host (ties to R12). **R17 (data
+      minimization) remains explicitly open** — unaffected by this build.
 - [ ] **R12 — Beta scheduling & host** (self-beta, added 2026-07-02; near-term, precedes R2's
-      always-on host): run the digest on a fixed interval (default hourly, new user env knob) and
-      keep the command listener up **unattended while my laptop is awake** — the pragmatic stopgap
-      before R2 item (4). Laptop-only/awake-only by decision (a closed lid sleeps); `launchd`-supervised;
-      delivery via self-chat, no bot provisioning needed. Not building yet — captured on Tessa's call.
+      always-on host): **the scheduling half shipped 2026-09-30** — see the ✅ tracker entry above
+      (auto-poll inside `listen`, 4h/weekday/10–18h, change-gated, bot delivery). **Still open:**
+      the "host" half — `listen` still needs to be kept running manually (no `launchd`/boot
+      persistence yet); that's the pragmatic stopgap before R2 item (4) and remains not built.
 - [ ] **R8 — Dynamic lookback** (to design; **interim shipped 2026-07-02**): the fixed window's
       default was bumped **72h→168h (7d)** as the pragmatic ~80%-of-the-value step — a week matches
       most people's clear-out rhythm, and it stays a **user-varyable knob** (the ideal range is
@@ -389,6 +509,38 @@ parked, not blocking.)
       run concurrently and can't see each other, so labels won't agree), urgency must stay visible (a HIGH
       buried in topic cluster #4 is the action-only failure mode again), and `done`/`snooze` numbering must
       stay monotonic down the card. See Roadmap R19.
+- [ ] **R20 — Content-packed floor for reply priority** (to be evaluated, added 2026-09-25): a
+      **content-packed** reply (e.g. someone explaining what a JBP is) should floor at **medium**; a
+      filler reply ("thanks", "haha") can stay `low`/FYI — even though today's actor-relative model can
+      bucket both as `low` ("no action needed from me"). Simplified same day from an earlier
+      Q&A-detection framing to a single content-density signal the classifier already has enough
+      context to judge. See Roadmap R20.
+- [ ] **R22 — Scoped `done all` for FYI + one-day TLDR of non-actionables** (user story, added
+      2026-10-09): Yixin's feedback — she usually doesn't engage with non-actionables, so wants
+      (a) `done all` scoped to the LOW/FYI panel only (clear the awareness tail without touching
+      her action items) and (b) a **one-day** TLDR of that bucket as a flat list of concise
+      **5W1H one-liners** (e.g. *"Yue Han Tessa Zhang. DM. 12.03pm. Replied haha to your message."*)
+      — not a themed synthesis. Overlaps with **R14** on the same bucket but pushes against R14's
+      "distillation, not re-list" framing: this is the re-list, made cheap by compressing each
+      row to a single sentence. See Roadmap R22 — may fold into R14 at build time depending on
+      the format question.
+- [x] **R21 — Protect Lark user tokens in `homes/`** (ASSESS-first, added 2026-10-09; **closed
+      same-day by assessment, not code**): Lark user tokens in `homes/<user>/.lark-cli/config.json`
+      are protected at rest by **macOS FileVault** (confirmed on 2026-10-09). The relevant
+      backup/sync surfaces were cleared: iCloud "Desktop & Documents Folders" sync is **off**, no
+      Time Machine backup drive is attached. Residual threat deliberately out of scope: a process
+      running as Tessa on the unlocked laptop (same ceiling as R17 — Keychain would hand that
+      process any secret anyway). Revisit if backup/sync setup changes, or if we move off a
+      single-user laptop (hosted deploy ⇒ FileVault no longer applies ⇒ Keychain-per-user path in
+      R21's Roadmap entry becomes live again).
+- [ ] **R23 — User-customizable poll frequency & window** (user story, added 2026-10-09): expose
+      today's global `POLL_*` env knobs (interval, start/end hour, weekdays-only — see
+      [src/config.js](src/config.js#L108-L126)) on a **per-user** basis — so each user picks
+      their own morning (and timezone, once we're hosted beyond SG hours). Natural pair-up with
+      **R12** (hosting) and **R2** (bot-driven onboarding): the right moment to build this is
+      after hosting, when a global `POLL_START_HOUR=10` is actively wrong for someone's 7:30
+      morning, not before. Lean DM-command-driven ("set-time 08:30") over owner-managed JSON.
+      See Roadmap R23.
 
 ---
 
@@ -685,15 +837,14 @@ action-only digest. Full rationale + the live measurements: **Directedness** sec
 choice required), `review_request` (PRD/doc/code/design), `question` (I'm being asked
 something), `fyi` (informational only, or I'm only looped in).
 
-A chunked Claude call (`claude-sonnet-4-6`, ≤40 msgs/call, run concurrently) does the
-classification, with a **`medium`/`question` fallback** so a message is never dropped on
-a parse error or when no API key is set. *(The fallback was `low`/`fyi` until 2026-08-11;
-once the digest started rendering only non-low items, a `low` fallback meant an unjudged
-message was **invisible** — and with no API key, every item fell back, silently emptying
-the whole digest. `medium` fails safe: "couldn't judge it ⇒ show it.")* The per-thread
-**summary cache** is versioned (`SUMMARY_CACHE_VERSION`,
-[fetchMentions.js](src/fetchMentions.js)) so a classifier prompt change re-classifies
-rather than serving stale verdicts.
+Concurrent 20-item calls go through LiteLLM's OpenAI-compatible
+`/v1/chat/completions` route (default model `claude-sonnet-5`, but any model on the
+virtual key's allow-list can be selected). Each response gets up to 16,384 tokens;
+the parser accepts fenced output, repairs trailing commas, and salvages complete
+objects from a response truncated mid-array. Any missing or invalid row falls back to
+`low`/`fyi`. This is safe because urgency is not a visibility gate: every fallback row
+still appears in the digest. The persistent per-thread summary cache was removed under
+R17, so prompt changes no longer require a cache-version bump.
 
 **Calibration — confirmed (Tessa, 2026-07-16)** — the reframe is aggressive by design,
 so the risk was over-demoting a politely-phrased real ask. Validated on the live card:
@@ -857,10 +1008,10 @@ file holds:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — (required) | Claude classification; without it every item falls back to `low`/`fyi`. Must be a key on an **IT-listed AI account** — message text is sent with it |
-| `ANTHROPIC_BASE_URL` | — (unset → `api.anthropic.com`) | Route classification via an Anthropic-compatible **gateway** (e.g. LiteLLM, which needs this override). ⚠️ The only setting that changes **where message text goes** — IT/Security-approved targets only; a non-default value is logged to stderr each run |
-| `SEND_AS` | `user` | `user` → deliver to my self-chat (works today); `bot` → bot DM reply (needs published bot-send scopes) |
-| `CLAUDE_MODEL` | `claude-sonnet-4-6` | Classification model |
+| `ANTHROPIC_API_KEY` | — (required) | Your **LiteLLM virtual key** (not a raw Anthropic key), sent as `Authorization: Bearer`. Without it (or without `ANTHROPIC_BASE_URL`) every item falls back to `low`/`fyi` |
+| `ANTHROPIC_BASE_URL` | — (required) | The approved LiteLLM gateway; classification calls its OpenAI-compatible `/v1/chat/completions` route. ⚠️ This controls where message text goes and must remain the IT/Security-approved target |
+| `SEND_AS` | `bot` | `bot` → bot DM reply (default hosted surface); `user` → deliver to my self-chat as a manual fallback |
+| `CLAUDE_MODEL` | `claude-sonnet-5` | LiteLLM model id; historical env name retained for compatibility and not limited to Claude models |
 | `LOOKBACK_HOURS` | `168` | Fixed **rolling** lookback per run (7 days; bumped from 72h 2026-07-02), independent of last run. User-tunable per taste/role. `LOOKBACK_DAYS` still honored for back-compat (×24) |
 | `RAW_PREVIEW_CHARS` | `160` | Chars of the verbatim message shown under each summary (≈2 lines) |
 | `WATERMARK_LOOKBACK_DAYS` | `14` | How far back to scan my own messages when building the reply watermark |
@@ -930,7 +1081,9 @@ scope does NOT deliver p2p DMs; you need the **DM** one.
 
 Everything the old broad app once granted — `base:*`, `docx:*`, feed/pins/recall, chat
 member/create/update, `contact:user:search`, reaction **write** — is simply **absent** on the
-new app (never granted, nothing to trim).
+new app (never granted, nothing to trim). That old broad app is still installed locally as
+lark-cli's `main` profile (used for unrelated non-inlark purposes) — see the pinned-profile fix
+above: inlark hardcodes `--profile larky` on every call so it can never silently run as `main`.
 
 **Consent is not automatic.** *Removing* scopes needs no re-consent; *adding a user scope* means
 **every onboarded user must re-authorize** (device flow) — token refresh never picks up new scopes.
@@ -945,9 +1098,12 @@ verify on the token (`auth status` scope count = 11, incl. `contact:user.basic_p
 
 ## Non-functional requirements
 
-- **On-demand only** — no polling; a run happens when I trigger `n` (or `npm run inlark`).
-  *(Relaxed by **R12**: a scheduled interval may also fire the digest. Still not event-polling —
-  it's a timed re-run of the same on-demand pipeline; nothing is marked read.)*
+- **On-demand, plus a scheduled auto-poll** — a run happens when I trigger `n` (or `npm run
+  inlark`), **and** (shipped 2026-09-30, **R12**) `npm run listen` also self-triggers one on a fixed
+  interval (default 4h; `POLL_INTERVAL_MINUTES`), weekdays only, 10:00–18:00 local. Still not
+  event-polling — it's a timed re-run of the same on-demand pipeline, and nothing is marked read.
+  The scheduled run additionally only **sends** a card when the unread set changed since the last
+  check (`requireChange` — see `commands.pollSignature`); a manual trigger always sends.
 - **Stateless window (by design)** — re-running re-surfaces the *same* current
   unread backlog within `LOOKBACK_HOURS`; a digest run does **not** mark anything
   read. Items leave only via replying (watermark), `done`, or `snooze`. (`lastRunAt`
@@ -962,13 +1118,13 @@ verify on the token (`auth status` scope count = 11, incl. `contact:user.basic_p
   but the dominant cost is the watermark `--sender` scan over `WATERMARK_LOOKBACK_DAYS`
   (14d, unchanged), so widening the mention/DM window from 3→7d adds little; the common
   case stays bounded.
-- **Privacy** — message text is sent to the Anthropic API for classification;
-  confirm this is acceptable for internal content before wider use. Since
-  2026-09-01 the endpoint is configurable (`ANTHROPIC_BASE_URL`) — **unset by
-  default**, so the guarantee above describes the shipped path. Setting it to
-  anything other than an IT/Security-approved gateway moves colleagues' message
-  text to an unsanctioned third party and voids this note; the run logs the
-  endpoint whenever it isn't the default.
+- **Privacy** — message text is sent to Traveloka's IT-listed **LiteLLM proxy**
+  (`ANTHROPIC_BASE_URL`, OpenAI-compatible `/v1/chat/completions`) for classification, not
+  directly to api.anthropic.com — this is now the required path (2026-09-08), not
+  an optional override. Confirm this is acceptable for internal content before
+  wider use, and that the deployed proxy is still the IT/Security-approved target:
+  pointing `ANTHROPIC_BASE_URL` at anything else moves colleagues' message text to
+  an unsanctioned third party and voids this note.
 - **Auth resilience** — owned by `lark-cli`; a `needs_refresh` token is still
   usable (it refreshes on the next API call), so runs don't fail on it.
 
@@ -1312,6 +1468,20 @@ Run inlark for myself **unattended** — the digest arrives on a schedule and th
 listener stays up — without manually kicking off `npm run …`. Single-user (me) first; generalises
 to per-user under R2.
 
+**✅ Scheduling half shipped (2026-09-30)** — see the tracker entry above. What actually got built
+differs from the plan below in two ways, now that reality had caught up with it:
+- **Cadence + window:** not hourly — **4h** (10:00/14:00/18:00), weekdays only, **change-gated**
+  (only sends when the unread set moved). The original framing assumed no change-gate was needed
+  ("Tessa's incoming-message frequency means the card genuinely differs most hours") — that held
+  for hourly, but a *shorter-than-hourly* cadence (30min was tried first) would post frequent
+  near-duplicate cards that bury the latest one, hence both the gate and the conservative 4h start.
+  `POLL_INTERVAL_MINUTES` is the knob to shrink later.
+- **Delivery + host:** follows `SEND_AS` (bot by default today, not self-chat — the bot surface
+  didn't exist yet when this was written) via the **same in-process timer inside `listen`**
+  described below (that part of the proposed architecture held up). The **host** half — `launchd`
+  supervision so `listen` survives reboots/crashes unattended — is **not built**; `listen` is still
+  kept running manually (nohup + log redirect). That remains the open part of R12.
+
 **Host decision (2026-07-02): laptop-only, awake — no always-on host yet.** A closed-lid MacBook
 sleeps, so scheduled jobs don't fire and the `listen` WS drops. Workarounds were weighed and
 rejected for the beta: clamshell mode (needs a dock), `sudo pmset -a disablesleep 1` (admin —
@@ -1436,6 +1606,18 @@ this brief more to do.
 each with a jump, instead of N verbatim rows. If it's the same list re-posted, it hasn't earned its
 place — a *briefing* is the point.
 
+**⚠️ Framing loosened 2026-10-09 (Yixin's feedback → R22).** The "synthesis **not** re-list"
+absolutism above doesn't survive first contact with the actual user task on FYI content. Tessa, on
+drilling in with Yixin: *"the re-list gives trust — we know what's really covered… why rephrase so
+much if we're just mentally going through that we really can dismiss these messages."* The
+cognitive task on non-actionables is **verification + dismissal**, not comprehension — and
+synthesis hides individual items behind themes, which is the opposite of what builds
+dismissal-confidence. So the daily FYI surface is now **R22** (flat 5W1H one-liners,
+trust-via-coverage), and R14's role shrinks to *"maybe-later weekly synthesis on top"* — a
+different artifact seeing patterns across a *week* of FYI, built *on* R22 only if demand is
+demonstrated. **R14's on-demand `catchup` first-cut below is superseded by R22 (b);** build R22
+first.
+
 **Pragmatic first cut (~80% value, no new deps):** an **on-demand `catchup` command** that takes the
 current LOW/FYI set (already fetched + classified + summary-cached by the digest pipeline) and posts
 **one synthesised brief card** — one extra synthesis call *over the cached per-item summaries*, so cheap.
@@ -1547,6 +1729,246 @@ a second axis on the digest card.
 
 **Status:** parked pending that re-measurement. No design chosen — this entry records the trigger, the
 round trip, and what to check first.
+
+### R20 — Content-packed floor for reply priority (to be evaluated, added 2026-09-25)
+
+**Simplified same day (2026-09-25) — read this version, not a Q&A-detection design.** First filed as
+"detect whether a reply answers my question," which needs thread context (was there a `?` before
+this?) and tangles two signals together. Tessa cut straight to the simpler rule: **it's a
+content-density floor, not a Q&A-detection problem.** Her example: someone **explaining what a JBP is**
+to me in a DM is more important than a **"thank you"** from the same person — no question involved
+either way, just information density. This is the same "surface the trivial ~80%-value rule before the
+fancy one" pattern as R8's lookback bump — see the memory on that.
+
+**The rule, as she put it:** if a message is **content-packed**, it needs a flag (floor it at least
+`medium`); a **filler** reply ("thanks", "haha", "ok", 👍) can just stay `low`/FYI as today. One
+boolean-ish signal, not a thread-context lookup.
+
+**Why this is simpler than the first cut:** the classifier already sees the message's own text on
+every call — this needs **no extra context** (no preceding message, no R6 slice change, no
+Q&A-pairing). It's much closer to "one more piece of evidence in the existing prompt" (like
+`is_broadcast` / Directedness) than a redesign.
+
+**Relationship to the existing actor-relative model.** Actor-relative urgency + **Named ≠ asked** (see
+**AI classification**, above) answer *"does the sender need me to do something?"* — a substantive
+explanation and a "thanks" can both answer "no" and land in the same `low` bucket today. Content-density
+is a **different, second question** — *does this message carry information worth reading?* — so this
+reads as an **orthogonal floor on top of the existing urgency call**, not a rewrite of it: "Named ≠
+asked" still decides whether something's asked of me; this just stops a genuinely informative message
+from being buried at the same tier as a bare ack solely because neither asks anything of me.
+
+**Open questions (assess before building — same house style as R16/R18):**
+- **Who judges "content-packed"?** Almost certainly the classifier itself (it already reads the full
+  message text for urgency/category) rather than a separate heuristic pass — but worth checking
+  whether a cheap deterministic pre-filter (ack-word/emoji-only list, length threshold) can catch the
+  obvious filler cases for free, same spirit as the `is_broadcast` structural check vs. free-text `cc`
+  detection (R5) trade-off already on record.
+- **Floor, not override:** does content-packed ever pull a message *above* medium (e.g. into `high`),
+  or is `medium` the ceiling for this signal alone — Tessa's framing ("at least medium") reads as a
+  floor only.
+- **New evidence field vs. new category:** a boolean fed into the existing prompt (cheapest, mirrors
+  Directedness) vs. a taxonomy change (`category: informative` alongside `fyi`) — lean evidence field
+  given how small this turned out to be.
+- **Interaction with the bot/app section and Directedness:** does a content-packed *bot* message (e.g.
+  a real incident write-up, not a routing ping) still get the floor inside its own section, or is this
+  human-only for now?
+
+**Not building yet — logged on Tessa's call (2026-09-25). Graduates to the tracker when built.**
+
+### R21 — Protect Lark user tokens in `homes/` (ASSESS-first, added 2026-10-09)
+
+Raised live after closing R17 (lastDigest encrypted at rest). The R17 pass protected
+the *digest state* (plaintext message content + AI summaries); it did NOT touch the
+*Lark user tokens* that `lark-cli` writes to `homes/<user>/.lark-cli/config.json` as
+part of the R2 multi-user onboarding — those still sit in plaintext in the repo
+folder. One file per non-owner user. Content is a long-lived refresh-token-bearing
+JSON blob: whoever reads it can impersonate that user against Lark's API until the
+token is revoked.
+
+**Why this isn't an exact copy of the R17 fix.** `lark-cli` owns these files — it
+reads/parses them on every call and writes them back on token refresh. We can't just
+swap the on-disk bytes to ciphertext; `lark-cli` would 500 on the next call. Three
+real options, with honest tradeoffs:
+
+- **(a) Encrypt-at-rest with a decrypt-tempfile wrapper around every `lark-cli` call.**
+  Every lark.js `runRaw` call pays a decrypt → write-tempfile → run → re-encrypt
+  cycle. Breaks nothing in `lark-cli`'s own code (it still sees a normal file at
+  `$HOME/.lark-cli/config.json`), but adds per-call latency on a listener that fires
+  on every DM, AND leaves a plaintext tempfile on disk for the duration of each call —
+  partially defeats the point.
+- **(b) Move the credentials off `homes/` into Keychain entirely — one entry per
+  user** (`inlark/user-token:<open_id>`). On every call: Keychain → tempfile →
+  `HOME=...` → `lark-cli` → read tempfile back → Keychain. Same per-call cost as (a),
+  but `homes/` is empty when inlark isn't running (zero at-rest window on disk,
+  which is the actual threat). This is the honest "right answer" if we're doing this.
+  More code than R17 — a tempfile lifecycle isolated per call, race-safe across the
+  listener's async dispatches, atomic re-sync after `lark-cli` refreshes a token.
+- **(c) Rely on macOS FileVault (full-disk encryption).** Already-shipped OS feature
+  that encrypts the whole disk at rest. The exact "attacker gets the drive / lost
+  laptop" threat is already covered — no code to write, no per-call cost. Gap: this
+  doesn't help with iCloud/Time Machine backup targets if those aren't themselves
+  encrypted, and doesn't help against a process running as Tessa on an unlocked
+  laptop (same ceiling as the R17 Keychain fix).
+
+**Owner call to make first:** check System Settings → Privacy & Security → FileVault.
+If it's on, (c) likely closes the threat (**verify backup-target encryption** too) and
+no code work is needed — flip this to **x** with that evidence. If FileVault is off or
+you want defense-in-depth, do **(b)** (not (a) — a decrypt-tempfile dance that leaves
+plaintext on disk during a call isn't worth the complexity).
+
+**Design notes if we build (b):**
+- One `inlark/user-token:<open_id>` Keychain entry per registered user. Owner's own
+  `~/.lark-cli/config.json` stays as-is (not in `homes/`, not inlark's job to manage).
+- `src/users.js` registry becomes the single source of truth for who exists; the
+  `home` field becomes a session-scoped tempdir path, created on first dispatch and
+  cleaned up on listener exit (not a persistent repo folder any more).
+- `adduser` flow changes: still manual device-flow onboarding (unchanged), but the
+  resulting `~/.lark-cli/config.json` content is immediately moved to Keychain and
+  the plaintext file deleted. `assertIdentity` still re-fires fresh every dispatch —
+  it just reads from a per-call-materialized tempfile instead of a persistent one.
+- Shared process state risk: concurrent dispatches must not reuse one tempdir. Give
+  each call its own tempdir (`mkdtemp`) so there's no HOME-override race across users.
+- Lifecycle gotcha: `lark-cli` refreshes tokens asynchronously on API calls. The
+  wrapper must detect "did `~/.lark-cli/config.json` change inside this call?" and
+  only then re-sync Keychain, so we don't clobber a refresh with the pre-call snapshot.
+- Rotation / revocation: a user leaving ⇒ one `security delete-generic-password` call.
+  No file to find and `shred`.
+
+**Closed 2026-10-09 by assessment, not code.** FileVault is on; iCloud Documents sync
+is off; no Time Machine drive attached. The attacker-gets-the-drive / lost-laptop threat
+is covered by the OS's full-disk encryption without any inlark-side code. The Roadmap
+notes above remain as the design-of-record if the environment changes — specifically if
+we move off a single-user laptop onto a hosted deploy (FileVault no longer applies then,
+and the Keychain-per-user path in (b) becomes the live answer).
+
+### R22 — Scoped `done all` for FYI + one-day TLDR of non-actionables (user story, added 2026-10-09)
+
+**Source:** Yixin Luo, inlark's test second user (R16 cohort GO, 2026-10-05) — her first
+substantive UX feedback after a few days on the digest. Two linked asks that both
+converge on the same bucket (the human LOW/FYI panel):
+
+**(a) Section-scoped `done all`.** Today `done all` clears the **whole delivered digest**
+in one shot ([tracker 2026-07-20](#)). For Yixin that's over-reach — she *does* engage with
+HIGH/MEDIUM, so she wants a form that **only clears the LOW/FYI section** and leaves her
+action items untouched. She described this as *"done all for that section only."* The
+`done all` safety-by-construction argument still holds for a section-scoped variant: the
+LOW panel lists every low item (no display cap), so the snapshot slice *is* exactly what
+was shown — nothing unseen is cleared. **Likely shape:** `done all low` / `done all fyi`
+as text commands (same lineage as `done 2 3`, zero new UI surface), optionally a button
+inside the collapsed panel once R7/R13's card-callback spike happens.
+
+**(b) One-day TLDR of the LOW/FYI bucket, flat 5W1H one-liners.** On drilling in with her:
+she doesn't want a 7-day rolling backlog of non-actionables — just **today's**, and she
+doesn't want paragraphs. Her literal example: *"Yue Han Tessa Zhang. DM. 12.03pm. Replied
+haha to your message."* So: **sender · surface/chat · time · what happened**, one short
+sentence per row, no verbatim excerpt, no per-item jump button (or a bare link at most).
+
+**Relationship to R14 — and the reframe this triggers (Tessa, 2026-10-09).** This is the
+same bucket R14 ("Catch Me Up" brief) targets, and it pushes against R14's load-bearing
+framing: *"synthesis, not a re-list — if it's the same list re-posted, it hasn't earned
+its place."* Yixin's ask **is** the re-list, and on talking it through, Tessa agreed:
+*"the re-list gives trust — we know what's really covered… why rephrase so much if we're
+just mentally going through that we really can dismiss these messages."*
+
+**So the thing R14 called a failure mode (re-list) is actually the design intent for FYI
+content.** The user's cognitive task on a non-actionable bucket isn't comprehension —
+it's **verification and dismissal**: *"show me every one so I can confirm I'm safe to
+skip them."* Synthesis is the wrong primitive there because it hides individual items
+behind themes, which is the opposite of what builds dismissal-confidence. Same family as
+the standing *"nothing is filtered, LOW is only collapsed"* constraint (tracker
+2026-08-11 action-only revert) and the per-LOW `FYI:` summaries that *"land as assurance
+nothing's missed"* (tracker 2026-07-16): **transparent coverage, not clever compression.**
+
+Rephrasing earns its place elsewhere (summarizing a thread's bundle, surfacing the ask
+for HIGH/MEDIUM), not here. The TLDR's win is **"did I see every one, is each short
+enough to dismiss at a glance, done."**
+
+**What this means for R14.** R14 isn't dead — a themed synthesis across a *week* of FYI
+could still earn its place as a *different* artifact (seeing patterns, not individual
+rows). But for the daily one-day cut Yixin asked for, R22 is the right primitive, and
+R14's "synthesis not re-list" absolutism is loosened to "synthesis *can* add value on
+top of a re-list, but doesn't replace it." R14's entry should be revised to reflect this.
+
+**Build sequencing:**
+- **R22 (b) is the near-term shipping candidate for the FYI daily surface**, not R14's
+  synthesis. The 5W1H one-liner is **mechanical** — sender + chat label + time + a terse
+  verb phrase on the message — and can be rendered **without an extra Claude call** by
+  templating off existing fields (`sender.name`, chat label, `create_time`, verb from
+  `category` + a short clip of `content`). That makes it the cheap floor that delivers
+  Yixin's trust-via-coverage value immediately.
+- **R14 becomes the "maybe-later synthesis on top"** — only if, after R22 ships and lives
+  for a bit, there's a demonstrated need for themed clustering (weekly patterns, "3 @all's
+  this week were X/Y/Z"). Builds *on* R22, not instead of it.
+
+**Open questions (assess before building — house style):**
+- **Window:** "one day" needs a definition (since this morning local / rolling 24h /
+  since-last-catchup). Same small variant on `LOOKBACK_HOURS` R14 already noted — not
+  the R8 anchor debate.
+- **Trigger surface:** on-demand `catchup` command (ships today, no R12 host) vs. EOD
+  auto-delivery (rides R12). First cut almost certainly on-demand.
+- **Scope — human-only vs. include bots:** the 🤖 BOT/APP section already pens bot items
+  separately on the digest card; does the TLDR mirror that split, or absorb bots too?
+  Lean: human-only for the first cut; revisit if the bot section ends up re-feeling
+  noisy for Yixin specifically.
+- **Content of each one-liner — rule or classifier?** Yixin's "replied haha" example is
+  a *paraphrase of what the sender did*, not a classification verdict. That's doable
+  deterministically for a handful of common patterns ("replied with …", "reacted …",
+  "posted in #channel") but will probably want the classifier for the long tail.
+  Measure first; don't commit to a Claude call per line if a template covers most of it.
+- **Does `done all` after a TLDR view clear the TLDR, the digest's LOW panel, or both?**
+  If TLDR and digest share the LOW snapshot, this is just one state field — but worth
+  stating explicitly before shipping.
+
+**Composes with — don't conflict with:**
+- The *"nothing is filtered from the digest card"* standing constraint (tracker 2026-08-11
+  action-only revert): the TLDR is an **additive** surface for the same low rows, never a
+  replacement that hides them from the digest. If (a) ships and someone uses `done all
+  low`, those rows leave `lastDigest` by their own action — unchanged safety model.
+- **R2 token budget:** on-demand only, cached per-item summaries already paid for by the
+  digest run that produced them — zero or one extra classify call per invocation, not per
+  row.
+
+**Not building yet — logged on Tessa's call (2026-10-09). Likely merges into R14 at build
+time; filed separately so Yixin's specific framing (one-day scope + 5W1H flat format +
+scoped `done all`) doesn't get rounded off into R14's synthesis-only pitch.**
+
+### R23 — User-customizable poll frequency & window (user story, added 2026-10-09)
+
+**Source:** Tessa, same day she was planning out R12 hosting. "Users should be able to
+customize their frequency & digest windows" — expose today's `POLL_*` knobs
+(interval, start/end hour, weekdays-only — see [src/config.js](src/config.js#L108-L126))
+on a *per-user* basis. Today those are **global** process-env values set by the owner;
+once we're hosted (R12) and multi-tenant (R2), a single `POLL_START_HOUR=10` is wrong
+for someone whose actual morning starts at 7:30.
+
+**Why it's not urgent yet:** we have three users, all in the same timezone, and the
+current defaults are "good enough for everyone named right now." The need appears
+sharply when either (a) someone hits the hardcoded window and complains, or (b) we
+onboard anyone outside SG hours.
+
+**Open questions (assess before building — same house style as R18/R20):**
+- **How does a user set it?** DM commands to the bot (`set-time 08:30` style) — most
+  frictionless, fits the no-IDE direction. Or a per-user config stored manually by
+  the owner alongside the registry entry — simpler but requires owner intervention,
+  defeats the point. Lean DM commands.
+- **Shape of the setting:** probably not full cron. "What time(s) do you want the
+  digest?" (one, two, or three slots) + "weekdays only?" covers 95% of real asks
+  without the complexity of a timezone picker on top of a cron builder.
+- **Timezone handling:** today's scheduler uses local server time (see
+  [src/scheduler.js](src/scheduler.js)'s `currentSlotId`). Hosted (R12) means that's
+  one TZ for everyone — probably UTC on the server. Hard to defer: as soon as users
+  spread beyond one TZ, "8:30" means different things. Store `IANA/zone` per user
+  and resolve at firing time.
+- **Where it lives:** per-user state is already a solved problem (encrypted
+  `state/<open_id>.json`); the schedule config could live there, or in `users.json`
+  alongside `home` — leans toward `users.json` since it's declarative config, not
+  mutable state.
+- **Composes with R12 (hosting) + R2 (bot-driven onboarding):** the natural moment
+  to build this is when the hosted bot is live and someone's complained about the
+  window, not before.
+
+**Not building yet — logged on Tessa's call (2026-10-09) during next-week-prioritization
+planning. Graduates to the tracker when the backlog prio actually lands.**
 
 ---
 
