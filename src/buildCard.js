@@ -227,7 +227,7 @@ export function buildFallbackDigestCard({ items, since, generatedAt = new Date()
   const elements = [
     {
       tag: 'markdown',
-      content: "Looks like I couldn't get to my back office to prioritise your digest, but here's a useful summary anyway:",
+      content: "Could not prioritise at the moment - quick summary:",
     },
     {
       tag: 'markdown',

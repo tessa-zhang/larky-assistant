@@ -742,7 +742,7 @@ test('buildFallbackDigestCard is compact, transparent, and contains no priority 
 
   assert.equal(card.header.title.content.startsWith('☀️ Your Morning Digest'), true);
   assert.ok(text.includes(
-    "Looks like I couldn't get to my back office to prioritise your digest, but here's a useful summary anyway:",
+    'Could not prioritise at the moment - quick summary:',
   ));
   const panels = card.body.elements.filter((element) => element.tag === 'collapsible_panel');
   assert.equal(panels.length, 2);

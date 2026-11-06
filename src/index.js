@@ -120,6 +120,11 @@ function reportMorningResults(dateKey, results) {
       console.log(`[morning] ${dateKey} — already sent to ${label}`);
     } else if (result.status === 'busy') {
       console.log(`[morning] ${dateKey} — ${label} busy; will retry`);
+    } else if (result.status === 'degraded') {
+      console.log(`[morning] ${dateKey} — ${label} classification unavailable; retrying in 5 minutes within the morning window`);
+    } else if (result.status === 'retry-later') {
+      // A degraded run is cooling down; no repeated log line on every minute tick.
+      continue;
     } else {
       console.error(`[morning] ${dateKey} — ${label} failed: ${result.error?.message || result.status}`);
     }

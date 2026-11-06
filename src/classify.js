@@ -164,6 +164,10 @@ function salvagePartial(body) {
 // per-item outputs) hit the limit on claude-sonnet-5 via LiteLLM (2026-10-12).
 // Pair with max_tokens: 16384 below. If this still truncates, drop again.
 const CHUNK_SIZE = 20;
+const REQUEST_TIMEOUT_MS = 60_000;
+const RETRY_DELAYS_MS = [500, 1500];
+const TRANSIENT_NETWORK_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN',
+  'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
 
 function chunk(arr, size) {
   const out = [];
@@ -226,6 +230,7 @@ async function classifyChunk({ apiKey, baseUrl }, items, userName) {
   const url = `${baseUrl.replace(/\/+$/, '')}/v1/chat/completions`;
   const resp = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       // 16384 (up from 8192) buys headroom so a bundled-thread row's longer
@@ -251,6 +256,23 @@ async function classifyChunk({ apiKey, baseUrl }, items, userName) {
   const data = await resp.json();
   const text = data.choices?.[0]?.message?.content ?? '';
   return extractJson(text);
+}
+
+async function classifyChunkWithRetry(client, items, userName, label) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await classifyChunk(client, items, userName);
+    } catch (error) {
+      const code = error.cause?.code || error.code;
+      const transient = TRANSIENT_NETWORK_CODES.has(code) || error.name === 'TimeoutError';
+      if (!transient || attempt >= RETRY_DELAYS_MS.length) throw error;
+      // A reset on wake/VPN reconnect must not turn an otherwise healthy inbox
+      // into a fallback on the first attempt. Retry only this failed chunk;
+      // auth/gateway HTTP errors and invalid model output keep their own paths.
+      console.warn(`[classify] chunk ${label} transport failure (${code || error.name}); retry ${attempt + 1}/${RETRY_DELAYS_MS.length}`);
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+    }
+  }
 }
 
 /**
@@ -282,7 +304,7 @@ export async function classify(items, { userName } = {}) {
   const client = buildClient();
   const chunks = chunk(items, CHUNK_SIZE);
 
-  const settled = await Promise.allSettled(chunks.map((c) => classifyChunk(client, c, userName)));
+  const settled = await Promise.allSettled(chunks.map((c, i) => classifyChunkWithRetry(client, c, userName, `${i + 1}/${chunks.length}`)));
 
   const byId = new Map();
   settled.forEach((s, i) => {

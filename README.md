@@ -55,7 +55,10 @@ npm run listen      # long-running WebSocket listener
 `listen` sends every onboarded user one **weekday morning digest** at 08:00
 local. If the Mac is asleep, it catches up on the first wake through 12:00;
 each user's completion date is persisted so wakeups and restarts cannot
-double-send. The older change-gated periodic poll remains available through
+double-send a healthy digest. If classification is unavailable, it sends one
+degraded card and retries every five minutes through the cutoff, sending one
+prioritized replacement after recovery. The company VPN must be connected for
+the LiteLLM gateway. The older change-gated periodic poll remains available through
 `POLL_*`, but is disabled in the current beta configuration.
 
 ## Setup
@@ -127,6 +130,13 @@ npm run service:logs
 code changes. It writes `~/Library/LaunchAgents/com.inlark.listener.plist` and
 logs to `~/Library/Logs/inlark/`; neither contains message content or secrets.
 Remove the service with `npm run service:uninstall` (logs are retained).
+
+If the digest says the back office is unavailable, connect the company VPN and
+run `npm run probe-models` yourself. A model list confirms the gateway/key path;
+HTML `403 Forbidden` or `ECONNRESET` means gateway access is still failing.
+Classification retries transient connection failures twice, with a 60-second
+deadline per attempt. Retries cannot repair a persistently unavailable gateway.
+After connectivity recovers, DM `n` for a fresh classification.
 
 For a same-day test, set `MORNING_DIGEST_TIME` a few minutes ahead and
 `MORNING_DIGEST_CUTOFF` later than that, then run `npm run service:install`.

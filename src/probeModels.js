@@ -19,7 +19,7 @@ async function main() {
     resp = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
   } catch (err) {
     console.error(`Network error reaching ${url}: ${err.cause?.code || err.message}`);
-    console.error('(Company VPN often breaks this host — try off-VPN.)');
+    console.error('(Check that the company VPN is connected and can reach the gateway.)');
     process.exit(1);
   }
 

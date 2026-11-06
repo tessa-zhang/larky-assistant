@@ -21,7 +21,7 @@ async function runForUser({ user, dateKey, digestsInFlight, footerHint }, servic
     });
     return {
       openId: user.openId,
-      status: result.reason === 'already-sent' ? 'already-sent' : 'sent',
+      status: ['already-sent', 'degraded', 'retry-later'].includes(result.reason) ? result.reason : 'sent',
       count: result.count,
     };
   } catch (error) {

@@ -374,6 +374,36 @@ feedback lands as a **Roadmap** item (bottom), then graduates up here once built
       provides separate collapsed **DMs** and **@ MENTIONS** sections with verbatim excerpts and
       jump links. No urgency colors, priority labels, or AI summaries appear. Done/snooze rerenders
       preserve the fallback layout.
+- [x] **Classification recovery after a degraded digest** *(2026-10-21)*: service logs
+      confirmed generic gateway HTML `403` rejections (the known company-VPN dependency),
+      and a pipeline bug made those failures stick: a degraded morning card completed the
+      day, while the poll change-gate skipped reclassification of the same unread backlog.
+      A fallback morning now remains eligible for classification every five minutes within
+      the existing 08:00–12:00 window. It sends at most one degraded card, preserving its
+      done/snooze number mapping during failed retries, then one prioritized replacement
+      after recovery; healthy/empty morning sends still complete the day. Existing degraded
+      morning snapshots can recover after restart too. Polls bypass the unchanged-message
+      gate when the last delivered card was degraded, so classification can recover on the
+      same inbox; an unchanged fallback poll is suppressed, while a changed inbox may send
+      an updated fallback and a recovered classifier sends its prioritized replacement.
+      Per-run logs record classified/total counts without message content. Recent owner
+      morning failures also showed lark-cli's
+      `token already refreshed by another process` exit during parallel reads; retry that
+      exact pre-API refresh race once after 200ms with the same HOME/profile. Revoked tokens
+      and API errors are not retried by this handler. Offline regressions replay both failures;
+      live verification/restart remains owner-run under the protected-credentials rule.
+- [x] **Retry interrupted model requests** *(2026-10-21 follow-up)*: the restarted
+      listener's 16:14 SGT owner run reached classification but both chunks failed with
+      `ECONNRESET` (0/29 classified). Morning rescheduling alone did not resolve that
+      transport failure. Each failed model chunk now gets at most two retries, after
+      500ms and 1500ms, for transient connection errors/timeouts, with a 60-second
+      deadline per attempt. Successful chunks are retained; HTTP 401/403 and invalid
+      model output are not treated as connection resets. Offline replay verifies
+      recovery from a reset and bounded failure on a persistent outage.
+- [ ] **Owner classification live verification** *(2026-10-21)*: confirm gateway
+      connectivity with the owner-run `npm run probe-models`, then restart and verify
+      a prioritized `n` card. Latest observed live result is still degraded (0/29,
+      connection reset); neither the retry fix nor VPN connectivity is live-verified.
 
 **🔜 Next** (detail in [Roadmap](#roadmap)) — **R2 single-user bot is LIVE (2026-08-04);** the cohort
 build is now gated on an assessment. (R8's interim 7d bump shipped 2026-07-02; fuller stable-anchor design

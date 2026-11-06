@@ -76,6 +76,9 @@ function startWindow() {
   return new Date(Date.now() - config.lookbackHours * MS_PER_HOUR).toISOString();
 }
 
+const digestServices = { store, fetchSince, classify, deliver, now: () => new Date() };
+const MORNING_RETRY_MS = 5 * 60_000;
+
 /**
  * Full digest run: fetch → classify → card. Persists lastRunAt + a snapshot of
  * the delivered items so done/snooze can act without re-fetching.
@@ -87,9 +90,17 @@ export async function runDigest({
   ack = false,
   requireChange = false,
   morningDigestDate = null,
-}) {
+}, services = digestServices) {
+  // Injectable boundaries keep pipeline regressions offline (no Lark, model, or Keychain access).
+  const { store, fetchSince, classify, deliver, now } = { ...digestServices, ...services };
   const state = store.clearExpiredSnoozes(await store.load(self.openId));
-  if (morningDigestDate && state.lastMorningDigestDate === morningDigestDate) {
+  const runAt = now();
+  // Older versions marked even a fallback as complete. Permit those snapshots
+  // to recover too, while retaining deduplication for healthy/empty mornings.
+  const legacyMorningFallback = state.lastMorningDigestDate === morningDigestDate
+    && !state.lastMorningDigestAttemptAt
+    && state.lastDigest?.cardMode === 'fallback';
+  if (morningDigestDate && state.lastMorningDigestDate === morningDigestDate && !legacyMorningFallback) {
     return {
       count: state.lastDigest?.items?.length || 0,
       sent: false,
@@ -97,9 +108,11 @@ export async function runDigest({
       skipped: {},
     };
   }
+  if (morningDigestDate && runAt - new Date(state.lastMorningDigestAttemptAt || 0) < MORNING_RETRY_MS) {
+    return { count: state.lastDigest?.items?.length || 0, sent: false, reason: 'retry-later', skipped: {} };
+  }
   const since = startWindow();
   const sinceDate = new Date(since); // fixed lookback window start
-  const runAt = new Date();
   // Strict title boundary: only the actual scheduled morning path supplies a
   // morningDigestDate. Manual `n`, CLI runs, polls, and fallbacks stay standard.
   const resolvedCardVariant = morningDigestDate ? 'morning' : 'standard';
@@ -114,7 +127,9 @@ export async function runDigest({
   // thread with a near-duplicate card. Manual triggers (`n`, npm run inlark)
   // never set requireChange, so a person asking for the digest always gets one.
   const signature = pollSignature(items);
-  if (requireChange && state.lastPollSignature !== null && signaturesEqual(signature, state.lastPollSignature)) {
+  const samePollSignature = signaturesEqual(signature, state.lastPollSignature);
+  if (requireChange && state.lastDigest?.cardMode !== 'fallback'
+    && state.lastPollSignature !== null && samePollSignature) {
     state.lastRunAt = runAt.toISOString();
     state.lastPollAt = runAt.toISOString();
     await store.save(self.openId, state);
@@ -150,6 +165,34 @@ export async function runDigest({
   // do not have, so one fallback switches the entire card to the transparent,
   // classification-free DM/@-mention layout.
   const cardMode = items.some((item) => item.fallback) ? 'fallback' : 'prioritized';
+  const classifiedCount = items.filter((item) => !item.fallback).length;
+  console.log(`[digest] <${self.openId}> classification: ${classifiedCount}/${items.length}; ${cardMode}`);
+
+  // A degraded poll must keep reclassifying an unchanged inbox so recovery can
+  // replace the fallback, but it should not deliver the same fallback card on
+  // every poll slot. A changed unread set can still produce an updated fallback;
+  // a recovered classification still sends the prioritized replacement below.
+  if (requireChange && cardMode === 'fallback' && state.lastDigest?.cardMode === 'fallback'
+    && samePollSignature) {
+    state.lastRunAt = runAt.toISOString();
+    await store.save(self.openId, state);
+    return { count: items.length, sent: false, reason: 'degraded', skipped };
+  }
+
+  if (morningDigestDate) {
+    state.lastMorningDigestAttemptAt = runAt.toISOString();
+    if (cardMode === 'fallback') {
+      // Retry within the morning window, but show only the first degraded card.
+      // Preserve the delivered number mapping until a healthy replacement sends.
+      const fallbackAlreadyDelivered = state.lastMorningFallbackDate === morningDigestDate || legacyMorningFallback;
+      if (legacyMorningFallback) state.lastMorningDigestDate = null;
+      if (fallbackAlreadyDelivered) {
+        state.lastMorningFallbackDate = morningDigestDate;
+        await store.save(self.openId, state);
+        return { count: items.length, sent: false, reason: 'degraded', skipped };
+      }
+    }
+  }
 
   // NOTHING is filtered out of the card (2026-08-11, reverting the same-day action-only
   // experiment): every fetched item is rendered. Humans keep their full HIGH / MEDIUM /
@@ -180,7 +223,10 @@ export async function runDigest({
   await deliver(delivery, card, 'interactive');
 
   state.lastRunAt = runAt.toISOString();
-  if (morningDigestDate) state.lastMorningDigestDate = morningDigestDate;
+  if (morningDigestDate) {
+    if (cardMode === 'fallback') state.lastMorningFallbackDate = morningDigestDate;
+    else state.lastMorningDigestDate = morningDigestDate;
+  }
   state.lastDigest = {
     generatedAt: runAt.toISOString(),
     since,
@@ -189,7 +235,7 @@ export async function runDigest({
     cardMode,
   };
   await store.save(self.openId, state);
-  return { count: items.length, skipped };
+  return { count: items.length, skipped, ...(cardMode === 'fallback' ? { reason: 'degraded' } : {}) };
 }
 
 /** Resolve card numbers → items from the last delivered digest. */

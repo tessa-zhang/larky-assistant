@@ -40,6 +40,10 @@ const EMPTY_STATE = {
   // Local YYYY-MM-DD of the last successfully delivered weekday morning
   // digest. Opaque scheduling metadata; content remains confined to lastDigest.
   lastMorningDigestDate: null,
+  // A fallback is delivered at most once; retry classification every five minutes
+  // within the morning window until a healthy replacement completes the day.
+  lastMorningFallbackDate: null,
+  lastMorningDigestAttemptAt: null,
   // Snapshot of the most recently delivered digest, so `done`/`snooze` can map
   // the numbers shown on the card to message_ids and re-render WITHOUT another
   // fetch/classify round-trip. Fields are kept to the minimum the renderer +

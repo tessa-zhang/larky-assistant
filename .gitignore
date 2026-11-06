@@ -13,4 +13,18 @@ restore-owner-qr.png
 .claude/settings.json
 .claude/settings.local.json
 
+# Agent instructions and local assistant configuration
+AGENTS.md
+**/AGENTS.md
+CLAUDE.md
+**/CLAUDE.md
+HANDOVER.md
+**/HANDOVER.md
+GEMINI.md
+**/GEMINI.md
+.codex/
+.claude/
+.github/copilot-instructions.md
+**/.github/copilot-instructions.md
+
 .DS_Store

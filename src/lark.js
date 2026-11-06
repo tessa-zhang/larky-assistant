@@ -26,7 +26,21 @@ export function scopedEnv(home) {
   return home ? { ...process.env, HOME: home } : process.env;
 }
 
-function runRaw(args, { home } = {}) {
+async function runRaw(args, options = {}) {
+  try {
+    return await runRawOnce(args, options);
+  } catch (err) {
+    // Parallel reads can race lark-cli's token refresh on wake. The losing
+    // process exits before the API call; retry once to use the winner's saved
+    // token, under the exact same HOME/profile. Never retry a revoked token or
+    // an API error here (especially a send whose delivery is uncertain).
+    if (!err.refreshRace) throw err;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return runRawOnce(args, options);
+  }
+}
+
+function runRawOnce(args, { home } = {}) {
   return new Promise((resolve, reject) => {
     // --profile pins the call to our app regardless of lark-cli's global active
     // profile (see LARK_CLI_PROFILE) — every exported function here goes through
@@ -45,7 +59,11 @@ function runRaw(args, { home } = {}) {
         }
         return resolve(parsed);
       }
-      if (err) return reject(new Error(`lark-cli ${args[0]} failed: ${stderr || err.message}`));
+      if (err) {
+        const error = new Error(`lark-cli ${args[0]} failed: ${stderr || err.message}`);
+        error.refreshRace = /^\[lark-cli\] uat-client: token already refreshed by another process\s*$/.test(stderr.trim());
+        return reject(error);
+      }
       reject(new Error(`lark-cli ${args[0]}: could not parse output`));
     });
   });
